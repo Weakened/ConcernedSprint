@@ -1,0 +1,10 @@
+# Local UE4SS runtime output and generated SDK/reflection dumps.
+# These are derived from the licensed game's own code and must never be committed.
+*.log
+CXXHeaderDump/
+UE4SS_SDK/
+*.usmap
+*.jmap
+
+# Release candidate packaging output (CS-003).
+artifacts/
