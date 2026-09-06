@@ -890,11 +890,16 @@ Two changes, both in `mod/ConcernedSprint/Scripts/`:
   the `BeginPlay` hook's actor parameter, matching the documented
   requirement and UE4SS's own bundled-mod usage.
 - The BeginPlay handling logic moved into a new, unit-tested function,
-  `lifecycle.lua`'s `on_actor_begin_play`, which requires a cheap,
-  local-only check (`actor:IsA("Pawn")`) to pass *before* the expensive
-  `resolve_local_pawn()` search is ever invoked. Most `BeginPlay` events
-  are for non-pawn actors and are now filtered out without touching
-  UE4SS's object-search machinery at all.
+  `lifecycle.lua`'s `on_actor_begin_play`, which requires
+  `actor:IsA("Pawn")` to pass *before* the expensive `resolve_local_pawn()`
+  search is ever invoked. Most `BeginPlay` events are for non-pawn actors
+  and are now filtered out without touching that search at all.
+  **Correction (§13.9):** an earlier version of this document described
+  `IsA(string)` as "cheap, local-only" — that's not accurate; it resolves
+  the class name via `StaticFindObject` internally on every call, per
+  UE4SS's own source. It's still one single, targeted lookup rather than
+  a full `PlayerController` enumeration, which is the real reason the
+  ordering matters, not zero cost.
 
 `tests/test_lifecycle.lua` adds regression coverage asserting on the
 *resolver's call count*, not just final state — specifically so a
@@ -964,3 +969,99 @@ static analysis alone:
 6. Record the actual result — PASS or a new crash — on issue #8 with the
    same evidence discipline as §13.1 (local evidence only, no raw
    logs/dumps/account identifiers in GitHub).
+
+### 13.9 A merge-integrity gap: two reviewed fixes never reached `main`
+
+After PR #9 (§13.5-13.6) was reported merged, a routine check of
+`origin/main`'s actual content (prompted by a follow-up audit, not by any
+new failure report) found that the squash merge had only captured the
+PR's first commit. The two follow-up commits — the `GetAddress()`
+identity fix (§13.5) and the `resolve_local_pawn()` validity hardening —
+had been independently reviewed, pushed, and confirmed present on the PR
+branch before merging, but `main`'s squash commit message and diff
+matched only the first commit. The underlying cause was not fully
+isolated (a plausible explanation is a timing gap between pushing the
+later commits and GitHub's merge API reflecting them, though this wasn't
+proven); what matters operationally is that `gh pr merge --squash`
+reporting success is not sufficient evidence that a squash merge captured
+everything a branch's tip contains.
+
+Recovered on branch `fix/cs-def-001-recover-main-fix` by cherry-picking
+the two missing commits directly (`git cherry-pick`), then verifying the
+result was byte-identical to the originally-reviewed state
+(`git diff <recovered-head> <original-commit> --stat` showing no
+differences) before proceeding — this time confirming via
+`gh api repos/.../branches/<branch>` that GitHub's own view of the branch
+head matched the local push before requesting any merge, rather than
+trusting the push command's local success alone.
+
+Practical consequence: `main` briefly contained the exact `actor == pawn`
+bug both independent reviews had already found and fixed on the PR
+branch. This was never installed anywhere (§13.7-13.8 already establish
+that 0.1.1 was never installed or retested), so no additional runtime
+risk resulted beyond what §13.7 already documents — but it is recorded
+here plainly because the whole point of the review process this
+investigation followed is that fixes some reviewer confirmed should
+actually be the fixes that ship, and this time the tooling silently
+broke that link. Post-merge diff verification against the reviewed
+commit is now treated as a required step, not an optional one, for any
+merge in this investigation going forward.
+
+### 13.10 Further hardening found during the recovery audit: cached component liveness in `apply()`
+
+Independent review during the recovery work above (§13.9) found a third
+real gap, in code untouched by either of the two `BeginPlay`-hook fixes:
+`sprint_adapter.lua`'s `apply()` reads `MaximumStamina`, reads `Stamina`,
+and writes `Stamina` on whatever component reference it's given, with no
+liveness check of its own. `get_sprint_component()` validates the
+component once, when `lifecycle.lua` first caches it — but that cached
+reference is then reused for up to a resolve interval (~3 seconds, §10)
+before the next re-resolve, and a pawn/level transition inside that
+window can invalidate the underlying object without the cached Lua
+reference itself changing.
+
+Verified directly against UE4SS's source at the pinned commit (files
+fetched locally for this specific check, not committed to this repo):
+- `IsValid()` (`LuaUObject.hpp`, the `UObjectBase` template's member
+  functions) performs a real liveness check: the stored pointer is
+  non-null, is not the library's own "invalid" sentinel, is still present
+  in the global tracked-object map, and is not marked unreachable.
+- Plain property get/set (`LuaUObject.hpp`'s `prepare_to_handle`, which
+  backs ordinary `component.Stamina`-style access) only checks that the
+  stored pointer is non-null before proceeding to dereference it
+  (`object->GetClassPrivate()` and onward) — it does not repeat any of
+  `IsValid()`'s other checks.
+- `get_remote_cpp_object()` (`LuaObject.hpp`) returns the wrapper's
+  stored pointer completely unchanged — nothing refreshes or re-validates
+  it on access.
+- `NotifyUObjectDeleted` (`LuaUObject.cpp`) removes a destroyed object
+  from the global tracked-object map (the thing `IsValid()` consults) but
+  never touches any existing Lua wrapper's own stored pointer.
+
+Net effect: a Lua-side reference to a since-destroyed component can
+remain non-nil and pass straight through a plain property read or write
+into what is, at the native level, a stale pointer — exactly the class of
+problem this whole investigation has been chasing, just in a third
+location neither `BeginPlay`-hook fix touched. A `pcall` around the
+property access does not substitute for this: it protects against a
+thrown Lua error, not against native code successfully dereferencing
+memory it should not.
+
+**Fix:** `apply()` now calls `component:IsValid()` (wrapped in its own
+`pcall`, failing closed if it throws) immediately before each of the
+three property operations, not once at the top — the "smallest guard"
+that directly closes the gap without touching `get_sprint_component()`'s
+existing bind-time validation or `lifecycle.lua`'s resolve-interval
+timing. New tests in `tests/test_sprint_adapter.lua` use a traced
+component (property reads/writes counted via `__index`/`__newindex`) to
+prove `apply()` never even attempts a read or write once invalid or once
+`IsValid()` itself throws — not merely that it returns `false` — plus a
+matching traced test confirming the expected reads and exactly one write
+still happen when the component is valid throughout. 41 tests pass in
+total.
+
+This closes a real, evidenced gap in the cached-reference lifetime. It
+does **not** prove or disprove the root cause of the specific crash that
+opened this issue (§13.1) — that remains exactly as unproven as §13.7
+already states, and the retest plan in §13.8 is unchanged by this
+addition.

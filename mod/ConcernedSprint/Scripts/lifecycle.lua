@@ -117,9 +117,16 @@ end
 -- from any hook-parameter wrapper by the caller (see main.lua and
 -- docs/RUNTIME_DISCOVERY.md CS-DEF-001 findings on RemoteUnrealParam).
 --
--- `isPawnLike(actor)` is a cheap, local-only check (e.g. `actor:IsA("Pawn")`)
--- that must return true before `resolvePawn()` -- a full local-player
--- search -- is ever invoked. This ordering is deliberate and
+-- `isPawnLike(actor)` (e.g. `actor:IsA("Pawn")`) must return true before
+-- `resolvePawn()` -- a full local-player search -- is ever invoked. Note
+-- `IsA(string)` is not a zero-lookup/local-only operation either: per
+-- UE4SS's own source at the pinned commit (`is_a_implementation` in
+-- LuaUObject.cpp), passing a string resolves it to a UClass via
+-- `StaticFindObject` on every call. It is still one single, targeted
+-- class lookup rather than the alternative it guards -- `resolvePawn`
+-- enumerating and checking every `PlayerController` instance in the
+-- object graph -- which is the actual, evidenced reason this ordering
+-- matters, not "free vs. not free". This ordering is deliberate and
 -- security/stability relevant, not a style choice: BeginPlay fires for
 -- every actor (props, effects, AI, pickups -- typically far more of these
 -- than pawns), and `resolvePawn` is expensive and, per CS-DEF-001's
