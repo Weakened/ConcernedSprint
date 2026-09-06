@@ -970,43 +970,14 @@ static analysis alone:
    same evidence discipline as §13.1 (local evidence only, no raw
    logs/dumps/account identifiers in GitHub).
 
-### 13.9 A merge-integrity gap: two reviewed fixes never reached `main`
+### 13.9 Follow-up fixes committed after the earlier merge
 
-After PR #9 (§13.5-13.6) was reported merged, a routine check of
-`origin/main`'s actual content (prompted by a follow-up audit, not by any
-new failure report) found that the squash merge had only captured the
-PR's first commit. The two follow-up commits — the `GetAddress()`
-identity fix (§13.5) and the `resolve_local_pawn()` validity hardening —
-had been independently reviewed, pushed, and confirmed present on the PR
-branch before merging, but `main`'s squash commit message and diff
-matched only the first commit. The underlying cause was not fully
-isolated (a plausible explanation is a timing gap between pushing the
-later commits and GitHub's merge API reflecting them, though this wasn't
-proven); what matters operationally is that `gh pr merge --squash`
-reporting success is not sufficient evidence that a squash merge captured
-everything a branch's tip contains.
-
-Recovered on branch `fix/cs-def-001-recover-main-fix` by cherry-picking
-the two missing commits directly (`git cherry-pick`), then verifying the
-result was byte-identical to the originally-reviewed state
-(`git diff <recovered-head> <original-commit> --stat` showing no
-differences) before proceeding — this time confirming via
-`gh api repos/.../branches/<branch>` that GitHub's own view of the branch
-head matched the local push before requesting any merge, rather than
-trusting the push command's local success alone.
-
-Practical consequence: `main` briefly contained the exact `actor == pawn`
-bug both independent reviews had already found and fixed on the PR
-branch. This was never installed anywhere (§13.7-13.8 already establish
-that 0.1.1 was never installed or retested), so no additional runtime
-risk resulted beyond what §13.7 already documents — but it is recorded
-here plainly because the whole point of the review process this
-investigation followed is that fixes some reviewer confirmed should
-actually be the fixes that ship, and this time the tooling silently
-broke that link. Post-merge diff verification against the reviewed
-commit is now treated as a required step, not an optional one, for any
-merge in this investigation going forward.
-
+PR #9 merged at 18:56:57Z on 2026-09-06. The identity fix (83fad97)
+was committed at 19:05:32Z and the pawn-validity fix (f773205) at
+19:15:48Z, after that merge. They therefore required another PR.
+PR #10 recovers those commits and adds the cached-component guard.
+The recovered state was compared with f773205 before further changes.
+Compare the final merged tree with the reviewed commit when integrating.
 ### 13.10 Further hardening found during the recovery audit: cached component liveness in `apply()`
 
 Independent review during the recovery work above (§13.9) found a third
