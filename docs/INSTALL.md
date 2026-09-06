@@ -58,7 +58,18 @@ checking what you already have.
    `ConcernedSprint : 1`
    (Add it as its own line; don't remove or reorder any existing lines —
    this preserves whatever other mods you already have configured.)
-5. Launch the game. `ue4ss\UE4SS.log` should show
+5. **Recommended: disable UE4SS's bundled extras you don't need**
+   (`CheatManagerEnablerMod`, `ConsoleCommandsMod`, `ConsoleEnablerMod`,
+   `BPML_GenericFunctions`, `BPModLoaderMod`, `Keybinds` — set each to
+   `: 0` in `mods.txt` if you installed UE4SS fresh just for this mod).
+   Concerned Sprint's own `Ctrl+F9` toggle does not depend on any of
+   them — `RegisterKeyBind` is a core UE4SS binding, not something the
+   bundled `Keybinds` mod provides (confirmed against UE4SS's own source
+   at the pinned commit). Keeping the mod list minimal reduces surface
+   area for the kind of cross-mod interaction that caused a crash in
+   0.1.0 — see `docs/RUNTIME_DISCOVERY.md`'s CS-DEF-001 section. Skip
+   this step if you already rely on one of those mods for something else.
+6. Launch the game. `ue4ss\UE4SS.log` should show
    `Starting Lua mod 'ConcernedSprint'` then
    `[ConcernedSprint] Mod loaded, enabled=true (toggle with Ctrl+F9)`,
    with no Lua error following either line.
