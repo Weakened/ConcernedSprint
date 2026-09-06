@@ -3,7 +3,11 @@
     Validates a Concerned Sprint release candidate ZIP.
 
 .DESCRIPTION
-    Checks, against the built zip: required files are present, no
+    Checks, against the built zip: the exact required file set is present
+    (compared by path, not just count -- a required file swapped for an
+    unexpected one with the same name-count is still caught), each
+    required .lua file actually compiles as Lua source (not just a file
+    with a matching name/extension -- catches a renamed binary), no
     forbidden content is present (loader binaries, game assets, logs,
     dumps, secrets), the version in the zip filename matches VERSION and
     is documented in CHANGELOG.md, and the recorded SHA-256 matches the
@@ -21,6 +25,8 @@
 param(
     [string]$ZipPath
 )
+
+$ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $artifactsDir = Join-Path $repoRoot "artifacts"
@@ -90,8 +96,16 @@ try {
         Check "required file present: $rel" (Test-Path $full) "not found at $full"
     }
 
-    $allFiles = Get-ChildItem -Path $extractDir -Recurse -File
-    Check "no unexpected files beyond the required set" ($allFiles.Count -eq $requiredFiles.Count) "found $($allFiles.Count) files, expected $($requiredFiles.Count): $($allFiles.Name -join ', ')"
+    # Compares actual relative paths against the required set, not just a
+    # count -- a count-only check would pass if a required file were
+    # swapped out for an equal number of unexpected ones.
+    $actualRelativePaths = Get-ChildItem -Path $extractDir -Recurse -File | ForEach-Object {
+        $_.FullName.Substring($extractDir.Length + 1)
+    }
+    $expectedRelativePaths = $requiredFiles | ForEach-Object { "ConcernedSprint\$_" }
+    $unexpectedPaths = Compare-Object -ReferenceObject $expectedRelativePaths -DifferenceObject $actualRelativePaths |
+        Where-Object { $_.SideIndicator -eq "=>" } | Select-Object -ExpandProperty InputObject
+    Check "no unexpected files beyond the required set" ($unexpectedPaths.Count -eq 0) ("found: " + ($unexpectedPaths -join ', '))
 
     $forbiddenPatterns = @('*.dll', '*.exe', '*.pak', '*.log', '*.dmp', '*.usmap', '*.jmap', 'UE4SS*', '*CXXHeaderDump*', '*.sav')
     $forbiddenFound = @()
@@ -100,13 +114,33 @@ try {
     }
     Check "no loader binaries, game content, logs, dumps or saves present" ($forbiddenFound.Count -eq 0) ("found: " + (($forbiddenFound | Select-Object -ExpandProperty Name -Unique) -join ', '))
 
-    foreach ($rel in @("Scripts\main.lua", "Scripts\sprint_adapter.lua", "Scripts\config.lua", "Scripts\lifecycle.lua")) {
+    foreach ($rel in $requiredFiles) {
         $full = Join-Path $modDir $rel
         if (Test-Path $full) {
             $content = Get-Content -Path $full -Raw
             $hasSecretLike = $content -match '(?i)(api[_-]?key|password|secret|token)\s*='
             Check "no secret-like content in $rel" (-not $hasSecretLike) "matched a secret-like pattern"
         }
+    }
+
+    # File-extension/name checks above only prove a file called
+    # "Scripts\main.lua" exists, not that it actually contains Lua source
+    # rather than, say, a renamed binary. Compiling each required .lua
+    # file with the real Lua compiler (parse-only) is a lightweight,
+    # meaningful proof that it's genuinely Lua text: a PE/binary payload
+    # cannot parse as Lua.
+    $luacCommand = Get-Command luac -ErrorAction SilentlyContinue
+    if ($luacCommand) {
+        $luaFiles = $requiredFiles | Where-Object { $_ -like "*.lua" }
+        foreach ($rel in $luaFiles) {
+            $full = Join-Path $modDir $rel
+            if (Test-Path $full) {
+                & luac -p $full 2>$null
+                Check "$rel is valid Lua source (luac -p)" ($LASTEXITCODE -eq 0) "luac -p rejected this file -- it may not be real Lua source"
+            }
+        }
+    } else {
+        Check "luac is available to verify .lua files are real Lua source" $false "luac not found on PATH -- install Lua (see docs/RELEASE.md) to get this check; required-file-present checks above only prove a file with that name exists, not that its content is genuine Lua"
     }
 }
 finally {
