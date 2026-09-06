@@ -1,4 +1,4 @@
-# Runtime discovery (CS-001, CS-002)
+# Runtime discovery (CS-001, CS-002, CS-003)
 
 Evidence for the installed Demonologist build, the selected UE4SS loader, and the
 real sprint/stamina hook. All findings below come from direct inspection of the
@@ -6,8 +6,9 @@ locally licensed install and a reversible, isolated UE4SS probe run against it
 (session `claude-bg-f2f50a48`, 2026-09-06). No class, property or function name
 in this document is guessed; each one was read from either the game's own file
 version resource or from UE4SS reflection/SDK data generated against the live
-process. Sections 1-6 are CS-001 (discovery); sections 7+ are CS-002
-(implementation and its own runtime verification).
+process. Sections 1-6 are CS-001 (discovery); 7-11 are CS-002
+(implementation and its own runtime verification); 12 is CS-003 (packaging
+and install/uninstall validation).
 
 ## 1. Installed game and engine
 
@@ -584,3 +585,109 @@ defect in this mod's own decision logic.
 - `ABP_PlayerCharacter_C`'s exact `/Game/...` path (§4.2), still not needed
   by the implementation (which resolves whatever pawn is actually possessed
   at runtime rather than hard-coding a class path) but still not captured.
+
+## 12. CS-003 packaging and validation evidence
+
+Scripts (`scripts/package.ps1`, `scripts/validate_package.ps1`,
+`scripts/test_install_fixture.ps1`) and full usage are documented in
+`docs/RELEASE.md`; this section is the evidence that a specific run of
+them actually worked, not just that they exist.
+
+**Package build.** `scripts/package.ps1` was run against version `0.1.0`
+(from `VERSION`). It produced `artifacts/ConcernedSprint-v0.1.0.zip`
+containing exactly `README.md`, `CHANGELOG.md`, and
+`Scripts/{main,sprint_adapter,config,lifecycle}.lua` under a
+`ConcernedSprint/` root — no loader binaries, no game content. That
+specific build's SHA-256 was `95598b28de3893220d096f58a0dd57a196c24d51b2f2b2917bc90c32d7806bc1`
+— recorded here as evidence this run happened, not as a value to rely on:
+rebuilding from identical source happened to reproduce this exact hash
+when tried a second time here, but the zip format's own metadata (e.g.
+timestamps) is not something `scripts/package.ps1` pins deliberately, so
+that stability isn't guaranteed across machines, .NET versions, or future
+changes to the script. The authoritative hash for whatever you actually
+have is always the `.sha256` file `scripts/package.ps1` writes alongside
+that specific zip, which is what `scripts/validate_package.ps1` and
+`docs/OWNER_SMOKE_TEST.md` check against — never a hash hardcoded in this
+document.
+
+**Validator actually validates, both directions.** `validate_package.ps1`
+against the real build: 22/22 checks passed (17 in the version described
+in the original PR; 5 more added responding to the independent review
+below). To confirm the validator isn't just rubber-stamping, it was also
+run against a deliberately broken test zip (wrong version, wrong recorded
+hash, three required files missing, an extra `UE4SS.dll` planted inside
+it) built only for this check and discarded afterward — every one of
+those 7 problems was caught and reported by name, exit code 1. Both runs
+are what "reproducible validation" means here: the same script, same
+pass/fail logic, correctly distinguishing a good build from a bad one.
+
+**Independent review found two real gaps in the validator itself, both
+fixed.** An adversarial review (documented in full on PR #7) went further
+than the deliberately-broken-zip test above and specifically tried to
+fool the validator rather than just break the build:
+1. It replaced `Scripts\main.lua`'s content with 16 bytes of fake PE
+   binary data, keeping the filename, extension, and file count
+   identical, and rebuilt the zip's SHA-256 to match. The validator (as
+   originally written) reported "All checks passed" — every check up to
+   that point only confirmed a file *named* `main.lua` existed, never
+   that its content was actually Lua.
+2. It removed `Scripts\lifecycle.lua` and added an unrelated
+   `Scripts\extra_unexpected.lua`, keeping the total file count at 6. The
+   "no unexpected files" check (as originally written) only compared
+   counts, so it passed despite a real required file being missing and
+   a real unexpected file being present (the separate per-file
+   `required file present` check still caught the missing file
+   independently, so overall validation still correctly failed exit 1 —
+   but that check-level gap was real).
+
+Both were fixed in `validate_package.ps1`: the "no unexpected files"
+check now compares actual relative file paths against the required list
+(so a same-count swap is caught by name, not just missed by count), and
+each required `.lua` file is now additionally compiled with `luac -p`
+(parse-only) — a real PE/binary payload cannot parse as Lua, so this
+directly closes gap 1. Re-running both exact attack scenarios above
+against the fixed script: attack 1 now fails on
+`Scripts\main.lua is valid Lua source (luac -p)`; attack 2 now fails on
+`no unexpected files beyond the required set` with the exact unexpected
+path named, in addition to the pre-existing missing-file check. The
+review also caught that this PR's own description contained the literal
+substring "does not close #4" — GitHub's issue-auto-close matching is a
+plain keyword scan that doesn't understand negation, so that phrasing
+would have auto-closed issue #4 on merge despite saying the opposite;
+the PR body was reworded to avoid the trigger phrase entirely and the
+auto-close link was confirmed removed (`closingIssuesReferences: []`)
+before merge.
+
+**Disposable fixture install/uninstall.** `test_install_fixture.ps1`
+builds a throwaway fake `ue4ss\Mods\` folder (pre-populated with an
+unrelated mod and existing `mods.txt` entries) entirely under the OS temp
+directory — never touches the real game. All 8 checks passed: install
+added exactly the `ConcernedSprint` folder and one `mods.txt` line without
+disturbing the pre-existing mod or its line; uninstall removed exactly
+what install added; the fixture's file list after uninstall was compared
+programmatically (not just eyeballed) against its pre-install state and
+found identical.
+
+**Real local install/uninstall, from the packaged zip (not the dev source
+tree).** Same reversible method as CS-001/CS-002 (backup + hash every
+pre-existing file, install additively, verify, uninstall, re-verify
+hashes match) — except this time the mod files came from *extracting the
+built zip*, the actual artifact a user would download, not copied
+directly from `mod/ConcernedSprint/`. Results:
+- Mod loaded cleanly (`[ConcernedSprint] Mod loaded, enabled=true`), no
+  Lua errors.
+- Same correct behavior observed as CS-002: resolved a menu `DefaultPawn`
+  correctly (logged once), then attached to a real live
+  `BP_SprintComponent` with no error, stable 150s+ (no new crash report).
+- Both uninstall paths tested against the real install: mod-only
+  uninstall (delete `ConcernedSprint` folder, remove its `mods.txt` line)
+  left the pre-existing `BPModLoaderMod` entry and folder untouched; full
+  uninstall (also removing `dwmapi.dll`/`ue4ss\`) restored the three
+  pre-existing files' SHA-256 to the exact original baseline.
+
+**What this does and doesn't show.** All of the above is startup,
+packaging-integrity, and non-destructive-installation evidence — real,
+but not gameplay. §11's pending items (stamina holding through an actual
+sprint, the `Ctrl+F9` keypress path, map/lobby transitions during real
+play) are unchanged by this section and remain the content of
+`docs/OWNER_SMOKE_TEST.md`.
