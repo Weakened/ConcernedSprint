@@ -1,53 +1,40 @@
 # Changelog
 
-## 0.1.1 — 2026-09-06 (release candidate, unretested)
+## 0.1.2 - 2026-09-06 (release candidate; not gameplay-retested)
 
-Fixes a defect (CS-DEF-001) found by the v0.1.0 owner smoke test, which
-crashed with a native access violation during real gameplay. **This
-version has not yet been retested against the actual game** — see
-`docs/RUNTIME_DISCOVERY.md` section 13 for the full investigation, the
-fix, and exactly what remains unproven pending a coordinated retest.
+- Recovered two follow-up fixes committed after PR #9 merged: compare
+  local-pawn identity by native address and validate the resolved pawn.
+- Check cached sprint-component validity before accessing stamina.
+  A component can become invalid between periodic pawn resolutions.
+- Corrected the description of the BeginPlay filter: IsA with a string
+  performs a class lookup; it does not avoid all object lookup.
+- These corrections do not establish the cause of the reported native crash.
 
-- Fixed: the `BeginPlay` hook never unwrapped its actor parameter
-  (`:get()`), so its "is this the local pawn" check could never match.
-  This was silent in menu-only testing but meant an expensive,
-  uncached local-player search ran unconditionally on every single
-  actor's `BeginPlay` during real gameplay, not just pawns.
-- Now filters on a cheap, local-only check (`actor:IsA("Pawn")`) before
-  ever performing that search. Regression-tested by asserting on how
-  often the search runs, not just on final behavior.
-- `docs/INSTALL.md` now recommends disabling UE4SS's bundled extras
-  (cheat manager, console mods, BP mod loader, keybinds) for a
-  Concerned Sprint-only install; none of them are required for this
-  mod's own functionality.
+## 0.1.1 - 2026-09-06 (superseded before install)
 
-## 0.1.0 — 2026-09-06 (release candidate)
+- Unwrap the BeginPlay actor parameter and filter pawn events before
+  resolving the local player. Later review fixes needed a separate PR
+  because they were committed after this version's PR merged.
+- Neither 0.1.1 nor 0.1.2 has been installed or gameplay-retested.
 
-Initial release candidate.
+## 0.1.0 - 2026-09-06
 
-- Unlimited sprint duration for the locally controlled player; original
-  movement speed and sprint controls unchanged.
-- Enable/disable toggle (`Ctrl+F9`), persisted across sessions.
-- Handles map changes, death/respawn and spectator pawn swaps.
+- Unlimited sprint duration for the locally controlled player.
+- Preserve normal movement speed and sprint controls.
+- Ctrl+F9 toggles the feature; the setting is saved between sessions.
+- Periodically rebind the sprint component when the local pawn changes.
 
-### Tested against
+Owner evidence: after an initial startup crash, the owner relaunched,
+reached Cyclone Street and sprinted continuously for about 30 seconds.
+The owner subsequently reported that in-game testing works fine.
 
-- Demonologist, Steam app 1929610, build id `25123233`, engine
-  `++UE5+Release-5.6-CL-44394996` (Unreal Engine 5.6.1).
-- UE4SS `experimental-latest` prerelease, build
-  `UE4SS_v3.0.1-1125-g527a483b` (SHA-256
-  `4f9762f812329a640c8cfa14444c2bb97ecc213b8320bd4c5433383c3eef48f7`).
+### Compatibility and remaining checks
 
-Full discovery and verification evidence: `docs/RUNTIME_DISCOVERY.md` in
-the source repository.
+Observed game: Demonologist Steam app 1929610, build 25123233,
+Unreal Engine 5.6.1 (5.6-CL-44394996).
+Observed loader: UE4SS_v3.0.1-1125-g527a483b.
 
-### Known limitations
-
-- UE4SS `experimental-latest` is a prerelease build; see
-  `docs/RUNTIME_DISCOVERY.md` section 10 for a UE4SS-internal stability
-  issue observed and mitigated during testing (residual risk during the
-  first ~30 seconds after launch is not fully ruled out).
-- Actual in-match play verification (stamina holding through an active
-  sprint, disabling/toggling mid-session, map transitions during real
-  gameplay) is a pending owner check — see the repository's owner smoke
-  test checklist.
+The intermittent native crash remains under investigation. Gameplay with
+0.1.2, Ctrl+F9 behavior, saved toggle state, speed comparison and a
+lobby/map transition remain to be individually verified. Multiplayer
+host/client behavior has not been verified. See README.md for installation.

@@ -87,14 +87,46 @@ function M.on_local_pawn_begin_play(state, pawn, enabled)
     return false
 end
 
+-- Two independently-obtained references to the *same* underlying UE
+-- object are not necessarily `==` in UE4SS's Lua bindings: each property
+-- read or hook-parameter unwrap can construct a fresh wrapper userdata
+-- for the same native pointer, and neither UObject's own wrapper type nor
+-- its bases define a custom equality metamethod (confirmed by an
+-- independent review reading UE4SS's actual source at the pinned commit
+-- -- see docs/RUNTIME_DISCOVERY.md's CS-DEF-001 section). `GetAddress()`
+-- returns the underlying native pointer as a plain Lua number, which
+-- compares by value regardless of wrapper identity, and is UE4SS's own
+-- documented way to identify a UObject (used in its official examples).
+local function same_object(a, b)
+    if not a or not b then
+        return false
+    end
+    local aOk, aAddress = pcall(function() return a:GetAddress() end)
+    if not aOk then
+        return false
+    end
+    local bOk, bAddress = pcall(function() return b:GetAddress() end)
+    if not bOk then
+        return false
+    end
+    return aAddress == bAddress
+end
+
 -- Call from a BeginPlay hook for *any* actor (BeginPlay fires for every
 -- actor in the game, not just pawns). `actor` must already be unwrapped
 -- from any hook-parameter wrapper by the caller (see main.lua and
 -- docs/RUNTIME_DISCOVERY.md CS-DEF-001 findings on RemoteUnrealParam).
 --
--- `isPawnLike(actor)` is a cheap, local-only check (e.g. `actor:IsA("Pawn")`)
--- that must return true before `resolvePawn()` -- a full local-player
--- search -- is ever invoked. This ordering is deliberate and
+-- `isPawnLike(actor)` (e.g. `actor:IsA("Pawn")`) must return true before
+-- `resolvePawn()` -- a full local-player search -- is ever invoked. Note
+-- `IsA(string)` is not a zero-lookup/local-only operation either: per
+-- UE4SS's own source at the pinned commit (`is_a_implementation` in
+-- LuaUObject.cpp), passing a string resolves it to a UClass via
+-- `StaticFindObject` on every call. It is still one single, targeted
+-- class lookup rather than the alternative it guards -- `resolvePawn`
+-- enumerating and checking every `PlayerController` instance in the
+-- object graph -- which is the actual, evidenced reason this ordering
+-- matters, not "free vs. not free". This ordering is deliberate and
 -- security/stability relevant, not a style choice: BeginPlay fires for
 -- every actor (props, effects, AI, pickups -- typically far more of these
 -- than pawns), and `resolvePawn` is expensive and, per CS-DEF-001's
@@ -113,7 +145,7 @@ function M.on_actor_begin_play(state, actor, isPawnLike, resolvePawn, enabled)
     end
 
     local pawn = resolvePawn()
-    if not pawn or actor ~= pawn then
+    if not pawn or not same_object(actor, pawn) then
         return false
     end
 

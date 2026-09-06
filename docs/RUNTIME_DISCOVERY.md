@@ -821,14 +821,68 @@ This is presented as a strong contributing factor, evidenced directly
 from source and from the mismatch between what CS-002 tested and what
 production load actually looked like — not as a proven, symbolicated root
 cause. No debugger or matching symbols were available to identify the
-exact faulting instruction (see §13.6), so the precise mechanism by which
+exact faulting instruction (see §13.7), so the precise mechanism by which
 this sustained load produced this specific access violation remains
 unconfirmed. What is confirmed is that this bug caused unconditional,
 uncached, high-frequency load on exactly the class of UE4SS machinery
 (object search, hook dispatch) that upstream's own tracker documents
 repeated concurrency/stability issues in.
 
-### 13.5 The fix
+### 13.5 A second, deeper instance of the same bug class, caught by independent review
+
+The first fix committed to this PR added `ActorParam:get()` (§13.3) but
+still compared the result directly (`actor == pawn`). An independent
+review of the PR traced both sides of that comparison through UE4SS's own
+source at the pinned commit — `:get()` on an object parameter and an
+ordinary property read like `playerController.Pawn` both end up
+constructing a wrapper through the same underlying path
+(`push_objectproperty` → `auto_construct_object` → `AActor::construct`)
+— and found that `AActor`'s own wrapper type is *also* one of the classes
+with no custom equality (`AActor::setup_metamethods` is empty, with the
+source's own comment stating so directly; its base
+`UObjectBase::setup_metamethods` registers `Index`/`NewIndex`/`Call` but
+never `Eq`), and that wrapper construction allocates fresh userdata on
+every call with no interning. In other words: fixing the outer
+`RemoteUnrealParam` unwrap (§13.3) was necessary but not sufficient — the
+*same* "fresh wrapper per access, no custom equality" problem recurs one
+level down, on the plain actor/pawn comparison itself, and `actor == pawn`
+was still very likely always `false` in real UE4SS even after the first
+fix, for the same underlying reason.
+
+The corrected comparison uses `GetAddress()` — a UE4SS-documented method
+returning the underlying native pointer as a plain Lua number, which
+compares by value regardless of how many independent wrapper objects
+reference it — instead of `==`. This is implemented as `same_object()` in
+`lifecycle.lua` and used by `on_actor_begin_play`. The regression test for
+this specifically constructs *two separate Lua tables* sharing only the
+same fake address (`tests/test_lifecycle.lua`,
+`"...via two distinct wrapper objects sharing one address"`), rather than
+passing one table as both the hook actor and the resolved pawn — the
+review noted that reusing the same table was itself a test-realism bug
+that let the broken `==` version pass despite not working in real UE4SS.
+That mistake is recorded here deliberately: a mock that's more convenient
+than the real API it stands in for can hide exactly the bug it should
+catch.
+
+A second, focused review specifically re-checked the `GetAddress()` fix
+itself, rather than assuming it was correct just because it addressed the
+first review's finding. It confirmed, from `GetAddress()`'s actual
+implementation at the pinned commit
+(`lua.set_integer(reinterpret_cast<uintptr_t>(...))` — a plain integer
+read fresh from the wrapper's stored pointer, in
+`UE4SS/include/LuaType/LuaUObject.hpp`), that this is both correct and
+the only sanctioned identity mechanism UE4SS's Lua API exposes (no
+`__eq`, no `IsSameObject` anywhere in the docs). It also found one real,
+minor hardening gap: `GetAddress()` itself performs no validity check
+(unlike `UObject:IsValid()`, which checks null/pending-kill/liveness),
+and `main.lua`'s `resolve_local_pawn()` returned `playerController.Pawn`
+without calling `:IsValid()` on it — not exploitable at this call site
+(the pawn is used synchronously, no GC window), but inconsistent with
+`sprint_adapter.lua`'s own `get_sprint_component`, which already
+validates its pawn argument. Fixed by adding the same check to
+`resolve_local_pawn()`.
+
+### 13.6 The fix
 
 Two changes, both in `mod/ConcernedSprint/Scripts/`:
 
@@ -836,17 +890,24 @@ Two changes, both in `mod/ConcernedSprint/Scripts/`:
   the `BeginPlay` hook's actor parameter, matching the documented
   requirement and UE4SS's own bundled-mod usage.
 - The BeginPlay handling logic moved into a new, unit-tested function,
-  `lifecycle.lua`'s `on_actor_begin_play`, which requires a cheap,
-  local-only check (`actor:IsA("Pawn")`) to pass *before* the expensive
-  `resolve_local_pawn()` search is ever invoked. Most `BeginPlay` events
-  are for non-pawn actors and are now filtered out without touching
-  UE4SS's object-search machinery at all.
+  `lifecycle.lua`'s `on_actor_begin_play`, which requires
+  `actor:IsA("Pawn")` to pass *before* the expensive `resolve_local_pawn()`
+  search is ever invoked. Most `BeginPlay` events are for non-pawn actors
+  and are now filtered out without touching that search at all.
+  **Correction (§13.9):** an earlier version of this document described
+  `IsA(string)` as "cheap, local-only" — that's not accurate; it resolves
+  the class name via `StaticFindObject` internally on every call, per
+  UE4SS's own source. It's still one single, targeted lookup rather than
+  a full `PlayerController` enumeration, which is the real reason the
+  ordering matters, not zero cost.
 
 `tests/test_lifecycle.lua` adds regression coverage asserting on the
 *resolver's call count*, not just final state — specifically so a
 regression back to "resolve on every actor" would fail a test even if it
-didn't happen to produce a visibly wrong result. 37 tests pass in total
-(`lua tests/run_tests.lua`).
+didn't happen to produce a visibly wrong result — plus, per §13.5, the
+identity comparison is regression-tested with two distinct wrapper
+objects sharing one address, not one table reused as both sides. 38
+tests pass in total (`lua tests/run_tests.lua`).
 
 Also changed, per issue #8's explicit instruction to isolate a minimal
 configuration: `docs/INSTALL.md` now recommends disabling UE4SS's bundled
@@ -862,7 +923,7 @@ config matching the crash) as inert reference files under
 `artifacts/cs-def-001-isolation/`, ready for a coordinated retest without
 hand-editing `mods.txt` live.
 
-### 13.6 What is not yet proven
+### 13.7 What is not yet proven
 
 Named explicitly, per issue #8's requirement not to claim a fix from
 static analysis alone:
@@ -872,24 +933,25 @@ static analysis alone:
   in this environment. The exact faulting instruction and its immediate
   caller inside `UE4SS.dll` were never identified by name — only by
   offset, and only reasoned about via matching *source-level* behavior
-  (§13.2-13.4), not a verified disassembly. §13.3-13.4 is the strongest
+  (§13.2-13.5), not a verified disassembly. §13.3-13.5 is the strongest
   evidenced explanation found, not a confirmed root cause.
 - **No live repro was attempted**, against either the real install or a
   fixture, because an owner-started game process was reported still
   running and touching the active install was explicitly out of scope for
-  this session. The isolation tiers (§13.5) are prepared, not executed.
-- **The fix has not been observed to prevent the crash.** It removes a
-  confirmed bug and a large, real, evidenced amount of unconditional load
-  on suspect machinery, and is covered by unit tests proving the new
-  *logic* is correct — but "the crash doesn't recur" can only be shown by
-  an actual retest against the real game, ideally starting with tier 3
-  (§13.5) since that's the configuration that actually crashed.
+  this session. The isolation tiers (§13.6) are prepared, not executed.
+- **The fix has not been observed to prevent the crash.** It removes two
+  confirmed bugs (§13.3, §13.5) and a large, real, evidenced amount of
+  unconditional load on suspect machinery, and is covered by unit tests
+  proving the new *logic* is correct against realistic mock semantics —
+  but "the crash doesn't recur" can only be shown by an actual retest
+  against the real game, ideally starting with tier 3 (§13.6) since
+  that's the configuration that actually crashed.
 - **CS-DEF-001 (#8) and CS-003 (#4) both stay open** until that retest
   passes. The loader stays disabled
   (`dwmapi.dll.concernedsprint-disabled`) on the real install until a
   coordinated retest window, per issue #8.
 
-### 13.7 Retest plan (for the coordinated window)
+### 13.8 Retest plan (for the coordinated window)
 
 1. Confirm the game is fully closed and no owner session is active before
    touching anything.
@@ -907,3 +969,70 @@ static analysis alone:
 6. Record the actual result — PASS or a new crash — on issue #8 with the
    same evidence discipline as §13.1 (local evidence only, no raw
    logs/dumps/account identifiers in GitHub).
+
+### 13.9 Follow-up fixes committed after the earlier merge
+
+PR #9 merged at 18:56:57Z on 2026-09-06. The identity fix (83fad97)
+was committed at 19:05:32Z and the pawn-validity fix (f773205) at
+19:15:48Z, after that merge. They therefore required another PR.
+PR #10 recovers those commits and adds the cached-component guard.
+The recovered state was compared with f773205 before further changes.
+Compare the final merged tree with the reviewed commit when integrating.
+### 13.10 Further hardening found during the recovery audit: cached component liveness in `apply()`
+
+Independent review during the recovery work above (§13.9) found a third
+real gap, in code untouched by either of the two `BeginPlay`-hook fixes:
+`sprint_adapter.lua`'s `apply()` reads `MaximumStamina`, reads `Stamina`,
+and writes `Stamina` on whatever component reference it's given, with no
+liveness check of its own. `get_sprint_component()` validates the
+component once, when `lifecycle.lua` first caches it — but that cached
+reference is then reused for up to a resolve interval (~3 seconds, §10)
+before the next re-resolve, and a pawn/level transition inside that
+window can invalidate the underlying object without the cached Lua
+reference itself changing.
+
+Verified directly against UE4SS's source at the pinned commit (files
+fetched locally for this specific check, not committed to this repo):
+- `IsValid()` (`LuaUObject.hpp`, the `UObjectBase` template's member
+  functions) performs a real liveness check: the stored pointer is
+  non-null, is not the library's own "invalid" sentinel, is still present
+  in the global tracked-object map, and is not marked unreachable.
+- Plain property get/set (`LuaUObject.hpp`'s `prepare_to_handle`, which
+  backs ordinary `component.Stamina`-style access) only checks that the
+  stored pointer is non-null before proceeding to dereference it
+  (`object->GetClassPrivate()` and onward) — it does not repeat any of
+  `IsValid()`'s other checks.
+- `get_remote_cpp_object()` (`LuaObject.hpp`) returns the wrapper's
+  stored pointer completely unchanged — nothing refreshes or re-validates
+  it on access.
+- `NotifyUObjectDeleted` (`LuaUObject.cpp`) removes a destroyed object
+  from the global tracked-object map (the thing `IsValid()` consults) but
+  never touches any existing Lua wrapper's own stored pointer.
+
+Net effect: a Lua-side reference to a since-destroyed component can
+remain non-nil and pass straight through a plain property read or write
+into what is, at the native level, a stale pointer — exactly the class of
+problem this whole investigation has been chasing, just in a third
+location neither `BeginPlay`-hook fix touched. A `pcall` around the
+property access does not substitute for this: it protects against a
+thrown Lua error, not against native code successfully dereferencing
+memory it should not.
+
+**Fix:** `apply()` now calls `component:IsValid()` (wrapped in its own
+`pcall`, failing closed if it throws) immediately before each of the
+three property operations, not once at the top — the "smallest guard"
+that directly closes the gap without touching `get_sprint_component()`'s
+existing bind-time validation or `lifecycle.lua`'s resolve-interval
+timing. New tests in `tests/test_sprint_adapter.lua` use a traced
+component (property reads/writes counted via `__index`/`__newindex`) to
+prove `apply()` never even attempts a read or write once invalid or once
+`IsValid()` itself throws — not merely that it returns `false` — plus a
+matching traced test confirming the expected reads and exactly one write
+still happen when the component is valid throughout. 41 tests pass in
+total.
+
+This closes a real, evidenced gap in the cached-reference lifetime. It
+does **not** prove or disprove the root cause of the specific crash that
+opened this issue (§13.1) — that remains exactly as unproven as §13.7
+already states, and the retest plan in §13.8 is unchanged by this
+addition.

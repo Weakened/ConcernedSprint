@@ -16,11 +16,18 @@ local function make_component(stamina, maxStamina)
     }
 end
 
-local function make_pawn(component)
+-- `address` defaults to a fixed value so existing tests that don't care
+-- about identity keep working; tests that specifically exercise identity
+-- comparison (see "on_actor_begin_play" below) pass distinct addresses,
+-- or build a second, independent wrapper table sharing the same address
+-- to realistically simulate UE4SS constructing a fresh wrapper userdata
+-- per access to the same underlying native object.
+local function make_pawn(component, address)
     return {
         BP_SprintComponent = component,
         IsValid = function() return true end,
         GetClass = function() return { GetFullName = function() return "Class /Script/Engine.FakePawn" end } end,
+        GetAddress = function() return address or 0x1000 end,
     }
 end
 
@@ -219,8 +226,8 @@ end)
 
 t.test("on_actor_begin_play calls the resolver for a pawn-like actor but does not write if it isn't the local pawn", function()
     local isPawnLike = make_pawn_like_checker(true)
-    local localPawn = make_pawn(make_component(40, 100))
-    local otherPawn = { name = "SomeAIActor" } -- pawn-like (e.g. an AI character), but not the local player
+    local localPawn = make_pawn(make_component(40, 100), 0x1000)
+    local otherPawn = make_pawn(make_component(1, 1), 0x2000) -- pawn-like (e.g. an AI character), different address, so not the local player
     local resolver = make_resolver({ localPawn })
     local state = Lifecycle.new(10, function() end)
 
@@ -231,30 +238,58 @@ t.test("on_actor_begin_play calls the resolver for a pawn-like actor but does no
     t.assert_eq(localPawn.BP_SprintComponent.Stamina, 40.0, "must not touch the real local pawn's component")
 end)
 
-t.test("on_actor_begin_play attaches and writes when the actor is genuinely the local pawn", function()
+-- This is the regression test for the identity-comparison bug an
+-- independent review found in an earlier version of this fix: comparing
+-- `actor == pawn` directly failed in real UE4SS because a fresh wrapper
+-- userdata is constructed on every independent access to the same
+-- underlying native object, and neither UObject's wrapper type nor its
+-- bases define custom equality. `actorFromBeginPlay` and
+-- `pawnFromResolver` are deliberately two separate Lua tables (not the
+-- same reference) sharing only the same GetAddress() value, to
+-- realistically simulate that. This test would fail against a plain
+-- `==` comparison even though it passed against the (unrealistic)
+-- same-table mock the bug shipped with.
+t.test("on_actor_begin_play attaches when the actor is the local pawn via two distinct wrapper objects sharing one address", function()
     local isPawnLike = make_pawn_like_checker(true)
     local component = make_component(40, 100)
-    local localPawn = make_pawn(component)
-    local resolver = make_resolver({ localPawn })
+    local sharedAddress = 0x5000
+    local actorFromBeginPlay = make_pawn(component, sharedAddress)
+    local pawnFromResolver = make_pawn(component, sharedAddress)
+    local resolver = make_resolver({ pawnFromResolver })
     local state = Lifecycle.new(10, function() end)
 
-    local applied = Lifecycle.on_actor_begin_play(state, localPawn, isPawnLike.check, resolver.resolve, true)
+    local applied = Lifecycle.on_actor_begin_play(state, actorFromBeginPlay, isPawnLike.check, resolver.resolve, true)
 
     t.assert_true(applied)
     t.assert_eq(component.Stamina, 100.0)
 end)
 
-t.test("on_actor_begin_play does not write for the local pawn while disabled", function()
+t.test("on_actor_begin_play does not write for the local pawn while disabled (distinct wrapper objects, same address)", function()
     local isPawnLike = make_pawn_like_checker(true)
     local component = make_component(40, 100)
-    local localPawn = make_pawn(component)
-    local resolver = make_resolver({ localPawn })
+    local sharedAddress = 0x5000
+    local actorFromBeginPlay = make_pawn(component, sharedAddress)
+    local pawnFromResolver = make_pawn(component, sharedAddress)
+    local resolver = make_resolver({ pawnFromResolver })
     local state = Lifecycle.new(10, function() end)
 
-    local applied = Lifecycle.on_actor_begin_play(state, localPawn, isPawnLike.check, resolver.resolve, false)
+    local applied = Lifecycle.on_actor_begin_play(state, actorFromBeginPlay, isPawnLike.check, resolver.resolve, false)
 
     t.assert_false(applied)
     t.assert_eq(component.Stamina, 40.0)
+end)
+
+t.test("on_actor_begin_play treats a missing/throwing GetAddress as not the same object, not a crash", function()
+    local isPawnLike = make_pawn_like_checker(true)
+    local localPawn = make_pawn(make_component(40, 100), 0x1000)
+    local weirdActor = { GetAddress = function() error("simulated GetAddress failure") end }
+    local resolver = make_resolver({ localPawn })
+    local state = Lifecycle.new(10, function() end)
+
+    local applied = Lifecycle.on_actor_begin_play(state, weirdActor, isPawnLike.check, resolver.resolve, true)
+
+    t.assert_false(applied)
+    t.assert_eq(localPawn.BP_SprintComponent.Stamina, 40.0)
 end)
 
 t.test("on_actor_begin_play handles a nil actor safely", function()

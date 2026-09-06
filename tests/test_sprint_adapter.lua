@@ -123,3 +123,77 @@ t.test("apply handles the write itself throwing", function()
     local result = Adapter.apply(proxy)
     t.assert_false(result)
 end)
+
+-- apply: per-access liveness guard (CS-DEF-001 hardening) -----------------
+--
+-- get_sprint_component() above only validates once, at bind time.
+-- lifecycle.lua then holds and reuses that same cached reference for up
+-- to a resolve interval (~3s) before re-resolving, so a pawn/level
+-- transition inside that window can invalidate the underlying object
+-- without the cached Lua reference itself changing. Independent review
+-- confirmed against UE4SS's own source (LuaUObject.hpp's
+-- `prepare_to_handle`, which backs plain property get/set) that a
+-- property read/write only null-checks the stored pointer -- it does not
+-- repeat the full liveness check `IsValid()` performs, so a stale-but-
+-- non-nil cached reference could otherwise reach a real property access.
+-- apply() now calls `component:IsValid()` immediately before every
+-- individual read/write, not just once. These tests use a traced
+-- component that counts property accesses, to prove apply() never even
+-- attempts a read/write once invalid -- not just that it returns false.
+
+-- Traced component: counts reads of MaximumStamina/Stamina and writes to
+-- Stamina via __index/__newindex, and lets the test control what
+-- IsValid() does (return true, return false, or throw) independently of
+-- those counts.
+local function make_traced_component(maxStamina, stamina, isValidFn)
+    local raw = { MaximumStamina = maxStamina, Stamina = stamina }
+    local trace = { reads = 0, writes = 0 }
+    local component = setmetatable({}, {
+        __index = function(_, key)
+            if key == "IsValid" then
+                return function() return isValidFn() end
+            end
+            if key == "MaximumStamina" or key == "Stamina" then
+                trace.reads = trace.reads + 1
+            end
+            return raw[key]
+        end,
+        __newindex = function(_, key, value)
+            if key == "Stamina" then
+                trace.writes = trace.writes + 1
+            end
+            raw[key] = value
+        end,
+    })
+    return component, trace
+end
+
+t.test("apply never reads or writes properties on a component invalidated since it was cached", function()
+    local component, trace = make_traced_component(100, 40, function() return false end)
+
+    local result = Adapter.apply(component)
+
+    t.assert_false(result)
+    t.assert_eq(trace.reads, 0, "must not read MaximumStamina or Stamina once invalid")
+    t.assert_eq(trace.writes, 0, "must not write Stamina once invalid")
+end)
+
+t.test("apply never reads or writes properties when IsValid() itself throws", function()
+    local component, trace = make_traced_component(100, 40, function() error("simulated liveness check failure") end)
+
+    local result = Adapter.apply(component)
+
+    t.assert_false(result)
+    t.assert_eq(trace.reads, 0)
+    t.assert_eq(trace.writes, 0)
+end)
+
+t.test("apply reads MaximumStamina/Stamina and writes exactly once when valid throughout", function()
+    local component, trace = make_traced_component(100, 40, function() return true end)
+
+    local result = Adapter.apply(component)
+
+    t.assert_true(result)
+    t.assert_eq(trace.writes, 1, "must write Stamina exactly once")
+    t.assert_true(trace.reads >= 2, "must have read both MaximumStamina and Stamina")
+end)

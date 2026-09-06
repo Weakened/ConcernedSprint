@@ -44,7 +44,18 @@ local function resolve_local_pawn()
     end
 
     local pawnOk, pawn = pcall(function() return playerController.Pawn end)
-    if not pawnOk then
+    if not pawnOk or not pawn then
+        return nil
+    end
+
+    -- Validated here too, not just downstream in sprint_adapter.lua's
+    -- get_sprint_component: on_actor_begin_play's identity comparison
+    -- (lifecycle.lua) uses this pawn directly via GetAddress(), which
+    -- itself has no validity check (per docs/RUNTIME_DISCOVERY.md's
+    -- CS-DEF-001 follow-up review) -- an invalid/pending-kill pawn should
+    -- never reach that comparison.
+    local pawnValidOk, pawnValid = pcall(function() return pawn:IsValid() end)
+    if not pawnValidOk or not pawnValid then
         return nil
     end
 
