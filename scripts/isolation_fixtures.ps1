@@ -11,8 +11,8 @@
     crash. This script writes each tier's exact mods.txt content (and a
     short description of what's enabled) under
     artifacts/cs-def-001-isolation/ (git-ignored) so the retest can pick
-    one up and drop it in verbatim, without hand-editing mods.txt during
-    a live session.
+    one up as a reference. Preserve unrelated entries rather than replacing
+    an existing mods.txt wholesale. Change the real install only with the game closed.
 
     Tier 0 (vanilla) has no mods.txt at all -- that's the point -- so it's
     represented by its own README explaining the state, not a mods.txt.
@@ -26,22 +26,21 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $outDir = Join-Path $repoRoot "artifacts\cs-def-001-isolation"
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
-# Tier 0: vanilla -- UE4SS not installed at all (dwmapi.dll absent, no
-# ue4ss folder). This is what "dwmapi.dll.concernedsprint-disabled"
-# already produces on the next launch; recorded here just so the full
-# tier list is in one place.
+# Tier 0 is a future diagnostic state, not the owner's current state.
+# Disabling a verified injection proxy preserves the complete loader tree.
 $tier0Dir = Join-Path $outDir "0-vanilla"
 New-Item -ItemType Directory -Path $tier0Dir -Force | Out-Null
 @"
 Tier 0: vanilla (no loader)
 
-State: dwmapi.dll and the ue4ss\ folder are both absent from the game
-executable directory. This is the current containment state (dwmapi.dll
-renamed to dwmapi.dll.concernedsprint-disabled) -- no action needed to
-reach this tier, it's already where the real install sits.
+Reference state: no UE4SS injection. The current owner install has its
+verified dwmapi.dll enabled. To test this tier later, close the game,
+back up/hash the proxy and reversibly rename only that verified proxy.
+Preserve the ue4ss folder and all mod/configuration files; restore the
+proxy afterward. This script does not apply any changes to the game.
 
-Purpose: confirms the game itself is stable with no loader at all, as a
-baseline. Not expected to crash; if it does, the defect isn't UE4SS-related.
+Purpose: collect a no-loader baseline if diagnosing a recurring crash.
+A result from one run alone does not prove or disprove a root cause.
 "@ | Set-Content (Join-Path $tier0Dir "README.txt")
 
 # Tier 1: bare loader -- UE4SS installed, nothing enabled in mods.txt at
@@ -65,10 +64,9 @@ Keybinds : 0
 @"
 Tier 1: bare loader (UE4SS installed, everything disabled)
 
-Purpose: confirms the pinned UE4SS build (experimental-latest,
-UE4SS_v3.0.1-1125-g527a483b) itself is stable against this game with zero
-Lua mods active. If this tier crashes, the defect is in the loader/game
-combination itself, independent of any mod (including ConcernedSprint).
+Purpose: gather evidence with the pinned loader and no Lua mods active.
+This is a reference configuration for a controlled test, not a stability
+claim. Preserve unrelated mod entries and configuration when preparing it.
 "@ | Set-Content (Join-Path $tier1Dir "README.txt")
 
 # Tier 2: loader + only ConcernedSprint (the isolated, minimal production
@@ -94,13 +92,10 @@ ConcernedSprint : 1
 @"
 Tier 2: loader + only ConcernedSprint
 
-Purpose: the actual recommended shipping configuration (see
-docs/INSTALL.md). RegisterKeyBind is a core UE4SS binding (confirmed
-against UE4SS/src/Mod/LuaMod.cpp at the pinned commit -- it is registered
-directly, not provided by the bundled "Keybinds" mod), so ConcernedSprint's
-Ctrl+F9 toggle does not require any other mod to be enabled. If this tier
-is stable where the full config (tier 3) was not, the crash involved
-interaction with one of the other bundled mods, not ConcernedSprint alone.
+Purpose: gather evidence with only ConcernedSprint active. Its Ctrl+F9
+binding uses core UE4SS functionality and does not need the bundled
+Keybinds mod. Differences between repeated runs may help narrow causes;
+one successful run does not prove a cross-mod interaction caused the crash.
 "@ | Set-Content (Join-Path $tier2Dir "README.txt")
 
 # Tier 3: current full config -- exactly what the owner had installed
@@ -126,11 +121,10 @@ ConcernedSprint : 1
 @"
 Tier 3: current full config (matches the crash)
 
-Purpose: reproduces the exact mods.txt from the preserved crash evidence
-(C:\code\ConcernedSprint\artifacts\crash-owner-20260906-131405\mods.txt),
-now running the fixed ConcernedSprint build, to confirm the fix holds
-under the same conditions the crash actually occurred in -- not just a
-narrower, cleaner tier.
+Purpose: reference the recorded enabled-mod list at crash time. The
+original settings are preserved locally. A later test of the new mod
+under similar conditions is evidence, not proof of crash elimination.
+Do not overwrite unrelated user entries to reproduce this list.
 "@ | Set-Content (Join-Path $tier3Dir "README.txt")
 
 Write-Output "Isolation tiers written to: $outDir"
