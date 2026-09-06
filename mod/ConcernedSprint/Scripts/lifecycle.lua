@@ -87,4 +87,37 @@ function M.on_local_pawn_begin_play(state, pawn, enabled)
     return false
 end
 
+-- Call from a BeginPlay hook for *any* actor (BeginPlay fires for every
+-- actor in the game, not just pawns). `actor` must already be unwrapped
+-- from any hook-parameter wrapper by the caller (see main.lua and
+-- docs/RUNTIME_DISCOVERY.md CS-DEF-001 findings on RemoteUnrealParam).
+--
+-- `isPawnLike(actor)` is a cheap, local-only check (e.g. `actor:IsA("Pawn")`)
+-- that must return true before `resolvePawn()` -- a full local-player
+-- search -- is ever invoked. This ordering is deliberate and
+-- security/stability relevant, not a style choice: BeginPlay fires for
+-- every actor (props, effects, AI, pickups -- typically far more of these
+-- than pawns), and `resolvePawn` is expensive and, per CS-DEF-001's
+-- investigation, was previously being invoked unconditionally for every
+-- single one of them because a missing parameter unwrap made the
+-- intended pawn check silently never match. Returns true if a top-up
+-- write was attempted.
+function M.on_actor_begin_play(state, actor, isPawnLike, resolvePawn, enabled)
+    if not actor then
+        return false
+    end
+
+    local pawnLikeOk, pawnLike = pcall(isPawnLike, actor)
+    if not pawnLikeOk or not pawnLike then
+        return false
+    end
+
+    local pawn = resolvePawn()
+    if not pawn or actor ~= pawn then
+        return false
+    end
+
+    return M.on_local_pawn_begin_play(state, pawn, enabled)
+end
+
 return M

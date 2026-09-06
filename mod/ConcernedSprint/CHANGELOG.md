@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.1 — 2026-09-06 (release candidate, unretested)
+
+Fixes a defect (CS-DEF-001) found by the v0.1.0 owner smoke test, which
+crashed with a native access violation during real gameplay. **This
+version has not yet been retested against the actual game** — see
+`docs/RUNTIME_DISCOVERY.md` section 13 for the full investigation, the
+fix, and exactly what remains unproven pending a coordinated retest.
+
+- Fixed: the `BeginPlay` hook never unwrapped its actor parameter
+  (`:get()`), so its "is this the local pawn" check could never match.
+  This was silent in menu-only testing but meant an expensive,
+  uncached local-player search ran unconditionally on every single
+  actor's `BeginPlay` during real gameplay, not just pawns.
+- Now filters on a cheap, local-only check (`actor:IsA("Pawn")`) before
+  ever performing that search. Regression-tested by asserting on how
+  often the search runs, not just on final behavior.
+- `docs/INSTALL.md` now recommends disabling UE4SS's bundled extras
+  (cheat manager, console mods, BP mod loader, keybinds) for a
+  Concerned Sprint-only install; none of them are required for this
+  mod's own functionality.
+
 ## 0.1.0 — 2026-09-06 (release candidate)
 
 Initial release candidate.

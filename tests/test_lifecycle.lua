@@ -182,3 +182,99 @@ t.test("onStatusChange reports no_component for a pawn without a sprint componen
     t.assert_eq(#calls, 1)
     t.assert_eq(calls[1], "no_component")
 end)
+
+-- on_actor_begin_play(): CS-DEF-001 regression coverage -------------------
+--
+-- CS-DEF-001 found that BeginPlay fires for every actor in the game, not
+-- just pawns, and an earlier version of main.lua called the expensive
+-- local-player resolver unconditionally for every single one of them
+-- (masked by a separate bug where the pawn-identity check never actually
+-- matched, so this went unnoticed until real gameplay -- see
+-- docs/RUNTIME_DISCOVERY.md's CS-DEF-001 section). These tests assert on
+-- the resolver's call count, not just final state, specifically to catch
+-- a regression back to "resolve on every actor" rather than "resolve only
+-- for pawn-like actors".
+
+local function make_pawn_like_checker(predicateResult)
+    local spy = { callCount = 0 }
+    spy.check = function(actor)
+        spy.callCount = spy.callCount + 1
+        return predicateResult
+    end
+    return spy
+end
+
+t.test("on_actor_begin_play never calls the expensive resolver for a non-pawn actor", function()
+    local isPawnLike = make_pawn_like_checker(false)
+    local resolver = make_resolver({ make_pawn(make_component(40, 100)) })
+    local state = Lifecycle.new(10, function() end)
+    local prop = { name = "SomeDoorProp" }
+
+    local applied = Lifecycle.on_actor_begin_play(state, prop, isPawnLike.check, resolver.resolve, true)
+
+    t.assert_false(applied)
+    t.assert_eq(isPawnLike.callCount, 1, "the cheap check must run")
+    t.assert_eq(resolver.callCount, 0, "the expensive local-player resolver must not run for a non-pawn actor")
+end)
+
+t.test("on_actor_begin_play calls the resolver for a pawn-like actor but does not write if it isn't the local pawn", function()
+    local isPawnLike = make_pawn_like_checker(true)
+    local localPawn = make_pawn(make_component(40, 100))
+    local otherPawn = { name = "SomeAIActor" } -- pawn-like (e.g. an AI character), but not the local player
+    local resolver = make_resolver({ localPawn })
+    local state = Lifecycle.new(10, function() end)
+
+    local applied = Lifecycle.on_actor_begin_play(state, otherPawn, isPawnLike.check, resolver.resolve, true)
+
+    t.assert_false(applied)
+    t.assert_eq(resolver.callCount, 1, "pawn-like actors do warrant the identity check")
+    t.assert_eq(localPawn.BP_SprintComponent.Stamina, 40.0, "must not touch the real local pawn's component")
+end)
+
+t.test("on_actor_begin_play attaches and writes when the actor is genuinely the local pawn", function()
+    local isPawnLike = make_pawn_like_checker(true)
+    local component = make_component(40, 100)
+    local localPawn = make_pawn(component)
+    local resolver = make_resolver({ localPawn })
+    local state = Lifecycle.new(10, function() end)
+
+    local applied = Lifecycle.on_actor_begin_play(state, localPawn, isPawnLike.check, resolver.resolve, true)
+
+    t.assert_true(applied)
+    t.assert_eq(component.Stamina, 100.0)
+end)
+
+t.test("on_actor_begin_play does not write for the local pawn while disabled", function()
+    local isPawnLike = make_pawn_like_checker(true)
+    local component = make_component(40, 100)
+    local localPawn = make_pawn(component)
+    local resolver = make_resolver({ localPawn })
+    local state = Lifecycle.new(10, function() end)
+
+    local applied = Lifecycle.on_actor_begin_play(state, localPawn, isPawnLike.check, resolver.resolve, false)
+
+    t.assert_false(applied)
+    t.assert_eq(component.Stamina, 40.0)
+end)
+
+t.test("on_actor_begin_play handles a nil actor safely", function()
+    local isPawnLike = make_pawn_like_checker(true)
+    local resolver = make_resolver({})
+    local state = Lifecycle.new(10, function() end)
+
+    local applied = Lifecycle.on_actor_begin_play(state, nil, isPawnLike.check, resolver.resolve, true)
+
+    t.assert_false(applied)
+    t.assert_eq(isPawnLike.callCount, 0, "must not even attempt the cheap check on a nil actor")
+end)
+
+t.test("on_actor_begin_play handles isPawnLike itself throwing", function()
+    local resolver = make_resolver({ make_pawn(make_component(40, 100)) })
+    local state = Lifecycle.new(10, function() end)
+    local actor = { name = "WeirdActor" }
+
+    local applied = Lifecycle.on_actor_begin_play(state, actor, function() error("simulated IsA failure") end, resolver.resolve, true)
+
+    t.assert_false(applied)
+    t.assert_eq(resolver.callCount, 0)
+end)

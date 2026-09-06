@@ -53,13 +53,31 @@ end
 
 -- Immediate reaction to pawn spawn/replacement (map change, death/respawn,
 -- spectator swap): a native, engine-wide hook on AActor::BeginPlay, fires
--- once per actor spawn -- not a scan, not per-frame. Filtered down to only
--- the local pawn before doing anything.
-RegisterBeginPlayPostHook(function(Actor)
-    local pawn = resolve_local_pawn()
-    if pawn and Actor == pawn then
-        Lifecycle.on_local_pawn_begin_play(lifecycleState, pawn, state.enabled)
+-- once per actor spawn -- not a scan, not per-frame.
+--
+-- The callback parameter is a RemoteUnrealParam wrapper, not a usable
+-- actor reference directly -- docs.ue4ss.com's own text for this hook
+-- says non-primitive parameters "must be retrieved via Param:Get()",
+-- and UE4SS's own bundled CheatManagerEnablerMod does exactly this
+-- (`local PlayerController = self:get()`) before using a hook parameter.
+-- An earlier version of this file compared the raw wrapper directly
+-- (`Actor == pawn`), which per RemoteUnrealParam's own documented
+-- semantics (a fresh wrapper object every call, no custom equality) does
+-- not compare as intended -- see docs/RUNTIME_DISCOVERY.md's CS-DEF-001
+-- section for the full evidence. Unwrapping first is what makes the
+-- pawn-identity check below actually work.
+RegisterBeginPlayPostHook(function(ActorParam)
+    local actorOk, actor = pcall(function() return ActorParam:get() end)
+    if not actorOk or not actor then
+        return
     end
+    Lifecycle.on_actor_begin_play(
+        lifecycleState,
+        actor,
+        function(a) return a:IsA("Pawn") end,
+        resolve_local_pawn,
+        state.enabled
+    )
 end)
 
 -- Sustained top-up while sprinting, at a fixed interval rather than every

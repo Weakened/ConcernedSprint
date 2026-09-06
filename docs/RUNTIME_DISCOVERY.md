@@ -1,4 +1,4 @@
-# Runtime discovery (CS-001, CS-002, CS-003)
+# Runtime discovery (CS-001, CS-002, CS-003, CS-DEF-001)
 
 Evidence for the installed Demonologist build, the selected UE4SS loader, and the
 real sprint/stamina hook. All findings below come from direct inspection of the
@@ -8,7 +8,8 @@ in this document is guessed; each one was read from either the game's own file
 version resource or from UE4SS reflection/SDK data generated against the live
 process. Sections 1-6 are CS-001 (discovery); 7-11 are CS-002
 (implementation and its own runtime verification); 12 is CS-003 (packaging
-and install/uninstall validation).
+and install/uninstall validation); 13 is CS-DEF-001 (the v0.1.0 owner smoke
+test crash: investigation, fix, and what remains unproven).
 
 ## 1. Installed game and engine
 
@@ -691,3 +692,218 @@ but not gameplay. §11's pending items (stamina holding through an actual
 sprint, the `Ctrl+F9` keypress path, map/lobby transitions during real
 play) are unchanged by this section and remain the content of
 `docs/OWNER_SMOKE_TEST.md`.
+
+## 13. CS-DEF-001: owner smoke test crashed — investigation and fix
+
+The v0.1.0 owner smoke test failed. GitHub issue #8 (CS-DEF-001) tracks
+this defect and preempted CS-003 (§12). This section documents what was
+found and fixed, and — per the issue's own explicit instruction —
+distinguishes what's actually proven from what's fixed-in-theory but not
+yet re-observed.
+
+### 13.1 What happened
+
+`EXCEPTION_ACCESS_VIOLATION reading address 0xffffffffffffffff`, 44
+seconds after launch, on the `GameThread`, with the engine's own hang
+detector separately flagging that same thread as stuck
+(`Misc.IsStuck=true`, matching `StuckThreadId`). Native call stack: ~30
+frames entirely inside `UE4SS.dll` (no symbols available — shipping
+build, no PDB published for this loader), then a handful of
+`Shivers-Win64-Shipping` frames, then `kernel32`/`ntdll`. A run of offsets
+repeats twice in slightly different order partway through the UE4SS
+frames — consistent with, but not proof of, a recursive/re-entrant call
+pattern. Full native offsets and the crash dump itself are preserved
+locally only (`C:\code\ConcernedSprint\artifacts\crash-owner-20260906-131405`,
+git-ignored) — not reproduced here per policy against putting minidumps
+or personal identifiers in source control. The mods active at crash time,
+per that preserved evidence: `CheatManagerEnablerMod`, `ConsoleCommandsMod`,
+`ConsoleEnablerMod`, `BPML_GenericFunctions`, `BPModLoaderMod`, `Keybinds`,
+and `ConcernedSprint` — i.e. every UE4SS bundled default plus this mod,
+not an isolated configuration.
+
+No local relaunch or repro attempt was made against the real install for
+this investigation: an owner-started game process was reported still
+running, and the containment already in place (`dwmapi.dll` renamed to
+`dwmapi.dll.concernedsprint-disabled`) was left exactly as is. Everything
+below comes from reading the preserved evidence and primary upstream
+source, not from a new local reproduction.
+
+### 13.2 Ruled out: `LoopInGameThreadWithDelay` itself
+
+The obvious first suspect was Concerned Sprint's own periodic timer
+(`main.lua`'s `LoopInGameThreadWithDelay` call, wired to `lifecycle.lua`'s
+rate-limited resolution — see §10). Upstream's own issue tracker
+(`UE4SS-RE/RE-UE4SS`) documents multiple confirmed, maintainer-acknowledged
+defects in exactly this subsystem: a same-thread vector-reallocation bug
+when a delayed action self-reschedules while `std::erase_if` is still
+draining the action list ([#1180](https://github.com/UE4SS-RE/RE-UE4SS/issues/1180),
+closed 2026-08-23), and a related cross-thread Lua-registry race (analyzed
+in the same thread; contained but not fully fixed by
+[PR #1375](https://github.com/UE4SS-RE/RE-UE4SS/pull/1375), merged into
+main before the pinned commit). One reported symptom in that thread is the
+identical error string: *"Access violation reading location
+0xFFFFFFFFFFFFFFFF."*
+
+This looked like a strong match on error string alone — but reading the
+actual `process_delayed_actions`/`LoopInGameThreadWithDelay` implementation
+in `UE4SS/src/Mod/LuaMod.cpp` **at the exact pinned commit** (527a483b,
+confirmed 72 commits ahead of PR #1375's merge commit, i.e. including it)
+shows a more defensive design than the older code discussed in that
+issue: ready actions are snapshotted under a mutex into a separate list,
+executed outside the lock with a `m_is_currently_executing_game_action`
+re-entrancy guard, and looping actions are re-armed by mutating the
+existing vector entry in place — not by inserting a new entry — before
+`std::erase_if` runs, also under the same lock. This does not match the
+"self-reschedule inserts into the vector `erase_if` is still iterating"
+shape the upstream issue describes. **This is presented as ruled out, not
+proven safe in every respect** — the point of writing it down is exactly
+what issue #8 asked for: distinguishing an attractive-but-unverified guess
+from what the source actually shows, rather than shipping a fix for the
+wrong subsystem.
+
+### 13.3 Found: a real bug in how `main.lua` handled its `BeginPlay` hook parameter
+
+`RegisterBeginPlayPostHook`'s own documentation page states that callback
+parameters "must be retrieved via `Param:Get()`" — but its own worked
+example never actually uses the parameter (`print("BeginPlayPostHook")`),
+so nothing in the docs demonstrates this in practice. Reading UE4SS's own
+bundled `CheatManagerEnablerMod` (installed alongside Concerned Sprint at
+crash time) confirmed the real pattern: it hooks
+`PlayerController:ClientRestart` and immediately does
+`local PlayerController = self:get()` before touching the parameter at
+all. Reading `LuaUObject.cpp` at the pinned commit confirms why this
+matters: `RegisterBeginPlayPostHook`'s native dispatcher wraps the actor
+pointer in a fresh `RemoteUnrealParam` on every single call
+(`LuaType::RemoteUnrealParam::construct(lua, &Context, ...)`), and
+`RemoteUnrealParam` defines no custom equality metamethod of its own
+(`setup_metamethods` is an empty function) — so comparing the raw,
+un-unwrapped parameter against anything relies on Lua's default userdata
+identity comparison, which a fresh wrapper object can never satisfy. The
+class's own documentation independently states that even calling
+`:IsValid()` directly on it is "nonsensical" and deliberately unsupported.
+
+v0.1.0's `main.lua` compared the raw hook parameter directly
+(`Actor == pawn`), never calling `:get()`. Consequence: the intended
+"is this actor the local pawn" check could never actually match — the
+`RegisterBeginPlayPostHook` fast-path was silently dead code for the
+entire v0.1.0 release. This alone doesn't crash anything (Lua's default
+`==` across mismatched userdata just returns `false`), which is exactly
+why CS-002's menu-idle testing (§9-10) never revealed it: the mod still
+*appeared* to work correctly, because the separate rate-limited timer
+path in `lifecycle.lua` was doing all the real work.
+
+### 13.4 The consequence that matters: unconditional expensive work on every actor's `BeginPlay`
+
+Because the pawn-identity check could never short-circuit anything, the
+full body of the hook — including `resolve_local_pawn()`, which calls
+`UEHelpers:GetPlayerController()` — ran to completion on **every single
+actor's `BeginPlay`**, not just pawns. Reading `UEHelpers.lua` at the
+pinned commit shows `GetPlayerController()` itself calls `FindAllOf`
+(every matching instance, not `FindFirstOf`) over `PlayerController` (or,
+if that finds nothing, `Controller`), with no caching of its own, then
+loops the results checking `IsLocalPlayerController()`. With
+`bUseUObjectArrayCache=false` (already the pinned setting — see §10; not
+a new finding here), each of those calls is an uncached, un-short-circuited
+scan.
+
+CS-002's own stability testing (§10) only ever ran this at a main menu,
+where very few actors spawn. Real gameplay spawns actors continuously —
+props, pickups, AI, effects — and, per this bug, *every one of them*
+triggered a full uncached player-controller scan, for the entire 44-second
+session, alongside every other bundled mod's own hooks sharing the same
+dispatch machinery (§13.1's mod list). This is a large, real, previously
+invisible difference between what CS-002 tested and what actually
+happened during the owner's session — precisely the gap issue #8 warns
+against papering over with "premature mitigation claims from earlier
+150-second menu runs."
+
+This is presented as a strong contributing factor, evidenced directly
+from source and from the mismatch between what CS-002 tested and what
+production load actually looked like — not as a proven, symbolicated root
+cause. No debugger or matching symbols were available to identify the
+exact faulting instruction (see §13.6), so the precise mechanism by which
+this sustained load produced this specific access violation remains
+unconfirmed. What is confirmed is that this bug caused unconditional,
+uncached, high-frequency load on exactly the class of UE4SS machinery
+(object search, hook dispatch) that upstream's own tracker documents
+repeated concurrency/stability issues in.
+
+### 13.5 The fix
+
+Two changes, both in `mod/ConcernedSprint/Scripts/`:
+
+- `main.lua` now calls `ActorParam:get()` before doing anything else with
+  the `BeginPlay` hook's actor parameter, matching the documented
+  requirement and UE4SS's own bundled-mod usage.
+- The BeginPlay handling logic moved into a new, unit-tested function,
+  `lifecycle.lua`'s `on_actor_begin_play`, which requires a cheap,
+  local-only check (`actor:IsA("Pawn")`) to pass *before* the expensive
+  `resolve_local_pawn()` search is ever invoked. Most `BeginPlay` events
+  are for non-pawn actors and are now filtered out without touching
+  UE4SS's object-search machinery at all.
+
+`tests/test_lifecycle.lua` adds regression coverage asserting on the
+*resolver's call count*, not just final state — specifically so a
+regression back to "resolve on every actor" would fail a test even if it
+didn't happen to produce a visibly wrong result. 37 tests pass in total
+(`lua tests/run_tests.lua`).
+
+Also changed, per issue #8's explicit instruction to isolate a minimal
+configuration: `docs/INSTALL.md` now recommends disabling UE4SS's bundled
+extras (`CheatManagerEnablerMod`, `ConsoleCommandsMod`, `ConsoleEnablerMod`,
+`BPML_GenericFunctions`, `BPModLoaderMod`, `Keybinds`) for a Concerned
+Sprint-only install. Confirmed against `LuaMod.cpp` at the pinned commit
+that `RegisterKeyBind` is a core UE4SS binding registered directly in
+engine code, not something the bundled `Keybinds` mod provides — so this
+mod's own `Ctrl+F9` toggle does not depend on any of them.
+`scripts/isolation_fixtures.ps1` generates the four `mods.txt` tiers
+(vanilla / bare loader / loader + only ConcernedSprint / current full
+config matching the crash) as inert reference files under
+`artifacts/cs-def-001-isolation/`, ready for a coordinated retest without
+hand-editing `mods.txt` live.
+
+### 13.6 What is not yet proven
+
+Named explicitly, per issue #8's requirement not to claim a fix from
+static analysis alone:
+
+- **No symbolication was possible.** No PDB is published for this UE4SS
+  build, and no disassembler/debugger (WinDbg, cdb, dumpbin) was available
+  in this environment. The exact faulting instruction and its immediate
+  caller inside `UE4SS.dll` were never identified by name — only by
+  offset, and only reasoned about via matching *source-level* behavior
+  (§13.2-13.4), not a verified disassembly. §13.3-13.4 is the strongest
+  evidenced explanation found, not a confirmed root cause.
+- **No live repro was attempted**, against either the real install or a
+  fixture, because an owner-started game process was reported still
+  running and touching the active install was explicitly out of scope for
+  this session. The isolation tiers (§13.5) are prepared, not executed.
+- **The fix has not been observed to prevent the crash.** It removes a
+  confirmed bug and a large, real, evidenced amount of unconditional load
+  on suspect machinery, and is covered by unit tests proving the new
+  *logic* is correct — but "the crash doesn't recur" can only be shown by
+  an actual retest against the real game, ideally starting with tier 3
+  (§13.5) since that's the configuration that actually crashed.
+- **CS-DEF-001 (#8) and CS-003 (#4) both stay open** until that retest
+  passes. The loader stays disabled
+  (`dwmapi.dll.concernedsprint-disabled`) on the real install until a
+  coordinated retest window, per issue #8.
+
+### 13.7 Retest plan (for the coordinated window)
+
+1. Confirm the game is fully closed and no owner session is active before
+   touching anything.
+2. Back up (list + hash) the current install state, exactly as in
+   §3/§10/§12's method.
+3. Re-enable the loader (rename `dwmapi.dll.concernedsprint-disabled` back
+   to `dwmapi.dll`) and install this fix's build.
+4. Start with tier 3 (`artifacts/cs-def-001-isolation/3-current-full-config/`)
+   — the configuration that actually crashed — and play long enough to
+   exceed the 44-second mark under real gameplay (not menu idle), ideally
+   covering a map/lobby transition per §11's own still-pending item.
+5. If stable, that's real evidence the fix holds under the original
+   conditions. If it still crashes, step down through tiers 2, 1 and 0 to
+   isolate which layer is actually responsible before further changes.
+6. Record the actual result — PASS or a new crash — on issue #8 with the
+   same evidence discipline as §13.1 (local evidence only, no raw
+   logs/dumps/account identifiers in GitHub).
