@@ -1,5 +1,16 @@
 # Runtime discovery (CS-001, CS-002, CS-003, CS-DEF-001)
 
+## Current audit status - 2026-09-06
+
+Owner PASS applies to installed **0.1.0**: successful relaunch, Cyclone
+Street reached and about 30 seconds of continuous sprint. The owner later
+reported that in-game testing works fine. The installed Lua hashes match
+the original staged 0.1.0; the verified dwmapi.dll proxy is present/enabled.
+**0.1.2** is the current source candidate and has not been installed or
+gameplay-retested. The earlier native crash's cause remains unproven.
+See [the short remaining checklist](OWNER_SMOKE_TEST.md). Historical
+discovery/menu tests below are not additional owner gameplay passes.
+
 Evidence for the installed Demonologist build, the selected UE4SS loader, and the
 real sprint/stamina hook. All findings below come from direct inspection of the
 locally licensed install and a reversible, isolated UE4SS probe run against it
@@ -695,11 +706,9 @@ play) are unchanged by this section and remain the content of
 
 ## 13. CS-DEF-001: owner smoke test crashed — investigation and fix
 
-The v0.1.0 owner smoke test failed. GitHub issue #8 (CS-DEF-001) tracks
-this defect and preempted CS-003 (§12). This section documents what was
-found and fixed, and — per the issue's own explicit instruction —
-distinguishes what's actually proven from what's fixed-in-theory but not
-yet re-observed.
+One v0.1.0 startup attempt crashed. The owner subsequently relaunched and
+successfully sprinted on Cyclone Street. Issue #8 tracks the intermittent
+failure; source corrections and owner success do not prove its cause.
 
 ### 13.1 What happened
 
@@ -721,14 +730,11 @@ per that preserved evidence: `CheatManagerEnablerMod`, `ConsoleCommandsMod`,
 and `ConcernedSprint` — i.e. every UE4SS bundled default plus this mod,
 not an isolated configuration.
 
-No local relaunch or repro attempt was made against the real install for
-this investigation: an owner-started game process was reported still
-running, and the containment already in place (`dwmapi.dll` renamed to
-`dwmapi.dll.concernedsprint-disabled`) was left exactly as is. Everything
-below comes from reading the preserved evidence and primary upstream
-source, not from a new local reproduction.
+The source investigation did not reproduce this crash in a fresh run.
+Temporary proxy disabling was historical containment; the verified proxy
+was later restored and is enabled. Preserve the current working install.
 
-### 13.2 Ruled out: `LoopInGameThreadWithDelay` itself
+### 13.2 Source comparison: delayed-action scheduling
 
 The obvious first suspect was Concerned Sprint's own periodic timer
 (`main.lua`'s `LoopInGameThreadWithDelay` call, wired to `lifecycle.lua`'s
@@ -755,11 +761,9 @@ re-entrancy guard, and looping actions are re-armed by mutating the
 existing vector entry in place — not by inserting a new entry — before
 `std::erase_if` runs, also under the same lock. This does not match the
 "self-reschedule inserts into the vector `erase_if` is still iterating"
-shape the upstream issue describes. **This is presented as ruled out, not
-proven safe in every respect** — the point of writing it down is exactly
-what issue #8 asked for: distinguishing an attractive-but-unverified guess
-from what the source actually shows, rather than shipping a fix for the
-wrong subsystem.
+shape the upstream issue describes. This static comparison did not find that particular older vulnerable
+pattern in the pinned code. It does not rule out a scheduler/native fault
+or establish the cause of the owner's crash.
 
 ### 13.3 Found: a real bug in how `main.lua` handled its `BeginPlay` hook parameter
 
@@ -923,52 +927,25 @@ config matching the crash) as inert reference files under
 `artifacts/cs-def-001-isolation/`, ready for a coordinated retest without
 hand-editing `mods.txt` live.
 
-### 13.7 What is not yet proven
+### 13.7 What remains unproven
 
-Named explicitly, per issue #8's requirement not to claim a fix from
-static analysis alone:
+The exact native fault was not symbolicated; matching symbols and a
+debugger were not available during investigation. Source review found
+logic/lifetime defects but did not prove the crash's root cause.
+The owner-verified build is 0.1.0. Candidate 0.1.2 has not been installed
+or gameplay-retested. Issues #8 and #4 remain open for those checks.
+The loader is enabled on the current installation.
 
-- **No symbolication was possible.** No PDB is published for this UE4SS
-  build, and no disassembler/debugger (WinDbg, cdb, dumpbin) was available
-  in this environment. The exact faulting instruction and its immediate
-  caller inside `UE4SS.dll` were never identified by name — only by
-  offset, and only reasoned about via matching *source-level* behavior
-  (§13.2-13.5), not a verified disassembly. §13.3-13.5 is the strongest
-  evidenced explanation found, not a confirmed root cause.
-- **No live repro was attempted**, against either the real install or a
-  fixture, because an owner-started game process was reported still
-  running and touching the active install was explicitly out of scope for
-  this session. The isolation tiers (§13.6) are prepared, not executed.
-- **The fix has not been observed to prevent the crash.** It removes two
-  confirmed bugs (§13.3, §13.5) and a large, real, evidenced amount of
-  unconditional load on suspect machinery, and is covered by unit tests
-  proving the new *logic* is correct against realistic mock semantics —
-  but "the crash doesn't recur" can only be shown by an actual retest
-  against the real game, ideally starting with tier 3 (§13.6) since
-  that's the configuration that actually crashed.
-- **CS-DEF-001 (#8) and CS-003 (#4) both stay open** until that retest
-  passes. The loader stays disabled
-  (`dwmapi.dll.concernedsprint-disabled`) on the real install until a
-  coordinated retest window, per issue #8.
+### 13.8 Candidate test and optional diagnosis
 
-### 13.8 Retest plan (for the coordinated window)
-
-1. Confirm the game is fully closed and no owner session is active before
-   touching anything.
-2. Back up (list + hash) the current install state, exactly as in
-   §3/§10/§12's method.
-3. Re-enable the loader (rename `dwmapi.dll.concernedsprint-disabled` back
-   to `dwmapi.dll`) and install this fix's build.
-4. Start with tier 3 (`artifacts/cs-def-001-isolation/3-current-full-config/`)
-   — the configuration that actually crashed — and play long enough to
-   exceed the 44-second mark under real gameplay (not menu idle), ideally
-   covering a map/lobby transition per §11's own still-pending item.
-5. If stable, that's real evidence the fix holds under the original
-   conditions. If it still crashes, step down through tiers 2, 1 and 0 to
-   isolate which layer is actually responsible before further changes.
-6. Record the actual result — PASS or a new crash — on issue #8 with the
-   same evidence discipline as §13.1 (local evidence only, no raw
-   logs/dumps/account identifiers in GitHub).
+After coordinating a test, close the game and back up the current mod
+and configuration before replacing files. The loader is already enabled;
+verify its actual state instead of following historical rename steps.
+Use the short [owner checklist](OWNER_SMOKE_TEST.md) for 0.1.2.
+If a crash recurs, retain evidence locally and use the inert isolation
+fixtures only as diagnostic references, preserving third-party settings.
+A successful run is evidence of that run, not proof an intermittent
+failure is eliminated. Record actual results without account identifiers.
 
 ### 13.9 Follow-up fixes committed after the earlier merge
 

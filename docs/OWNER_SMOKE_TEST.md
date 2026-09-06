@@ -1,54 +1,38 @@
-# Owner smoke test
+# Owner test evidence and remaining checks
 
-Everything independently verifiable without actually playing the game has
-been done (source, packaging, install/uninstall, and as much runtime
-verification as is safe without live gameplay — see
-`docs/RUNTIME_DISCOVERY.md`). What's left needs an actual play session.
-This is deliberately short.
+## Recorded PASS: installed 0.1.0
 
-## Setup
+On 2026-09-06, after an initial UE4SS startup crash, the owner successfully
+relaunched, reached Cyclone Street and sprinted continuously for about
+30 seconds. The owner subsequently reported that in-game testing works fine.
+The installed Lua files were checked against the original staged 0.1.0
+and matched. The verified loader proxy is present and enabled.
 
-1. Follow `docs/INSTALL.md` to install UE4SS, then Concerned Sprint
-   (`artifacts/ConcernedSprint-v0.1.0.zip` — verify its SHA-256 against
-   `ConcernedSprint-v0.1.0.zip.sha256` first).
-2. Launch the game.
+Package validation and reversible install/uninstall fixture checks are
+separate automated evidence; they do not establish gameplay stability.
 
-## Checklist
+## Current candidate: 0.1.2
 
-- [ ] **Launch**: `ue4ss\UE4SS.log` shows `[ConcernedSprint] Mod loaded,
-      enabled=true` with no error after it. Game reaches the main menu
-      normally.
-- [ ] **Sprint past normal exhaustion**: start a game (single-player is
-      the mode independently confirmed reachable so far — see the note
-      below on multiplayer), hold sprint well past when it would normally
-      run out. It should not run out while the mod is enabled.
-- [ ] **Original speed unchanged**: sprint and walk speed both feel exactly
-      as before installing the mod.
-- [ ] **Toggle/disable**: press `Ctrl+F9`. `UE4SS.log` should show
-      `[ConcernedSprint] Disabled (Ctrl+F9)`. Sprint should now exhaust
-      normally again, with no restart needed. Press `Ctrl+F9` again to
-      re-enable and confirm it comes back.
-- [ ] **Map/lobby transition**: change map, die/respawn, or return to
-      lobby and start a new game. The mod should keep working on the new
-      pawn without needing to relaunch (check `UE4SS.log` for a fresh
-      `[ConcernedSprint] Sprint adapter attached to local pawn` line and no
-      errors around the transition).
-- [ ] **Uninstall**: follow `docs/INSTALL.md` section 4. Confirm the game
-      launches normally afterward with no trace of the mod in the log.
+0.1.2 recovers follow-up fixes and checks cached component validity.
+It has not been installed or gameplay-retested. The known native crash's
+cause remains unproven. Keep the working 0.1.0 install until a coordinated
+test of the new candidate.
 
-## Multiplayer
+For that test, close the game, back up the existing mod folder and
+`mods.txt`, then follow [installation instructions](INSTALL.md) with
+`artifacts/ConcernedSprint-v0.1.2.zip` and its matching SHA-256 sidecar.
 
-Only single-player is confirmed reachable/safe by this development
-process (see `docs/RUNTIME_DISCOVERY.md` section 5 for why an automated
-session didn't attempt online lobbies). If you test in a multiplayer
-lobby, note here which mode (public/private, host/join) and how many
-players — don't assume it behaves the same as single-player until it's
-actually been tried, since the mod only ever acts on the locally
-controlled player's own pawn and hasn't been observed in a networked
-session.
+- [ ] Launch 0.1.2, enter a match and sprint for at least a minute.
+      Compare walk/sprint speed with normal play.
+- [ ] Press **Ctrl+F9**: stamina should drain normally. Press it again:
+      unlimited sprint should resume. Relaunch once with it disabled to
+      check the saved setting, then turn it back on.
+- [ ] Return to the lobby and start another match; confirm sprint still works.
 
-## If something's wrong
+If a crash recurs, preserve that run's logs locally and record the result
+on issue #8. Do not share account identifiers or raw dumps publicly.
+Isolation configurations are optional diagnostic references, not completed
+tests or a required four-tier owner checklist.
 
-Check `ue4ss\UE4SS.log` for `[ConcernedSprint]` lines and any Lua error
-immediately after one. File it against CS-OPS-001 with the relevant log
-excerpt.
+Multiplayer host/client behavior has not been verified; no compatibility
+claim is made for an untested mode.

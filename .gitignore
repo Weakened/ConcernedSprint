@@ -8,3 +8,6 @@ UE4SS_SDK/
 
 # Release candidate packaging output (CS-003).
 artifacts/
+
+# Local agent worktrees and session data.
+.claude/

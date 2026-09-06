@@ -1,17 +1,18 @@
 # Concerned Sprint
 
 A small Demonologist infinite-sprint mod by The Concerned Cat.
+Keeps normal movement speed and sprint controls. Press **Ctrl+F9** to turn
+infinite sprint on or off; it starts enabled and saves your choice.
 
-Status: release candidate. Source, tests, packaging, and install/uninstall
-are complete and verified against the real game (see
-[docs/RUNTIME_DISCOVERY.md](docs/RUNTIME_DISCOVERY.md)); actual in-game play
-verification is a pending owner check — see
-[docs/OWNER_SMOKE_TEST.md](docs/OWNER_SMOKE_TEST.md).
+The owner successfully tested **0.1.0** on Cyclone Street, sprinting for
+about 30 seconds after relaunch. **0.1.2** is the current source candidate;
+it has not been installed or gameplay-retested. The earlier intermittent
+native crash remains under investigation.
 
-Scope: unlimited sprint duration for the locally controlled player, original movement speed and sprint controls, and an enable/disable setting. No additional gameplay features.
+- [Install, controls and uninstall](mod/ConcernedSprint/README.md)
+- [Owner test evidence and remaining checks](docs/OWNER_SMOKE_TEST.md)
+- [Build and validate](docs/RELEASE.md)
+- [Detailed runtime evidence](docs/RUNTIME_DISCOVERY.md)
 
-- Install/uninstall: [docs/INSTALL.md](docs/INSTALL.md)
-- Building/validating a release: [docs/RELEASE.md](docs/RELEASE.md)
-- Full discovery and verification evidence: [docs/RUNTIME_DISCOVERY.md](docs/RUNTIME_DISCOVERY.md)
-
-Development follows GitHub issues in `Weakened/ConcernedSprint`. Read [AGENTS.md](AGENTS.md) and [the execution contract](docs/AUTONOMOUS_EXECUTION.md).
+Development follows issues in Weakened/ConcernedSprint.
+Read [AGENTS.md](AGENTS.md) and [the execution contract](docs/AUTONOMOUS_EXECUTION.md).

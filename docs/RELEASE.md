@@ -3,6 +3,9 @@
 Everything here is scripted and reproducible; none of it needs the game
 running.
 
+Prerequisites: PowerShell 7, Lua 5.4 and its luac compiler available on PATH.
+Run lua tests/run_tests.lua from the repository root for the unit checks.
+
 ## Build
 
 ```powershell
