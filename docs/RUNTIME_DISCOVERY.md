@@ -821,14 +821,50 @@ This is presented as a strong contributing factor, evidenced directly
 from source and from the mismatch between what CS-002 tested and what
 production load actually looked like — not as a proven, symbolicated root
 cause. No debugger or matching symbols were available to identify the
-exact faulting instruction (see §13.6), so the precise mechanism by which
+exact faulting instruction (see §13.7), so the precise mechanism by which
 this sustained load produced this specific access violation remains
 unconfirmed. What is confirmed is that this bug caused unconditional,
 uncached, high-frequency load on exactly the class of UE4SS machinery
 (object search, hook dispatch) that upstream's own tracker documents
 repeated concurrency/stability issues in.
 
-### 13.5 The fix
+### 13.5 A second, deeper instance of the same bug class, caught by independent review
+
+The first fix committed to this PR added `ActorParam:get()` (§13.3) but
+still compared the result directly (`actor == pawn`). An independent
+review of the PR traced both sides of that comparison through UE4SS's own
+source at the pinned commit — `:get()` on an object parameter and an
+ordinary property read like `playerController.Pawn` both end up
+constructing a wrapper through the same underlying path
+(`push_objectproperty` → `auto_construct_object` → `AActor::construct`)
+— and found that `AActor`'s own wrapper type is *also* one of the classes
+with no custom equality (`AActor::setup_metamethods` is empty, with the
+source's own comment stating so directly; its base
+`UObjectBase::setup_metamethods` registers `Index`/`NewIndex`/`Call` but
+never `Eq`), and that wrapper construction allocates fresh userdata on
+every call with no interning. In other words: fixing the outer
+`RemoteUnrealParam` unwrap (§13.3) was necessary but not sufficient — the
+*same* "fresh wrapper per access, no custom equality" problem recurs one
+level down, on the plain actor/pawn comparison itself, and `actor == pawn`
+was still very likely always `false` in real UE4SS even after the first
+fix, for the same underlying reason.
+
+The corrected comparison uses `GetAddress()` — a UE4SS-documented method
+returning the underlying native pointer as a plain Lua number, which
+compares by value regardless of how many independent wrapper objects
+reference it — instead of `==`. This is implemented as `same_object()` in
+`lifecycle.lua` and used by `on_actor_begin_play`. The regression test for
+this specifically constructs *two separate Lua tables* sharing only the
+same fake address (`tests/test_lifecycle.lua`,
+`"...via two distinct wrapper objects sharing one address"`), rather than
+passing one table as both the hook actor and the resolved pawn — the
+review noted that reusing the same table was itself a test-realism bug
+that let the broken `==` version pass despite not working in real UE4SS.
+That mistake is recorded here deliberately: a mock that's more convenient
+than the real API it stands in for can hide exactly the bug it should
+catch.
+
+### 13.6 The fix
 
 Two changes, both in `mod/ConcernedSprint/Scripts/`:
 
@@ -845,8 +881,10 @@ Two changes, both in `mod/ConcernedSprint/Scripts/`:
 `tests/test_lifecycle.lua` adds regression coverage asserting on the
 *resolver's call count*, not just final state — specifically so a
 regression back to "resolve on every actor" would fail a test even if it
-didn't happen to produce a visibly wrong result. 37 tests pass in total
-(`lua tests/run_tests.lua`).
+didn't happen to produce a visibly wrong result — plus, per §13.5, the
+identity comparison is regression-tested with two distinct wrapper
+objects sharing one address, not one table reused as both sides. 38
+tests pass in total (`lua tests/run_tests.lua`).
 
 Also changed, per issue #8's explicit instruction to isolate a minimal
 configuration: `docs/INSTALL.md` now recommends disabling UE4SS's bundled
@@ -862,7 +900,7 @@ config matching the crash) as inert reference files under
 `artifacts/cs-def-001-isolation/`, ready for a coordinated retest without
 hand-editing `mods.txt` live.
 
-### 13.6 What is not yet proven
+### 13.7 What is not yet proven
 
 Named explicitly, per issue #8's requirement not to claim a fix from
 static analysis alone:
@@ -872,24 +910,25 @@ static analysis alone:
   in this environment. The exact faulting instruction and its immediate
   caller inside `UE4SS.dll` were never identified by name — only by
   offset, and only reasoned about via matching *source-level* behavior
-  (§13.2-13.4), not a verified disassembly. §13.3-13.4 is the strongest
+  (§13.2-13.5), not a verified disassembly. §13.3-13.5 is the strongest
   evidenced explanation found, not a confirmed root cause.
 - **No live repro was attempted**, against either the real install or a
   fixture, because an owner-started game process was reported still
   running and touching the active install was explicitly out of scope for
-  this session. The isolation tiers (§13.5) are prepared, not executed.
-- **The fix has not been observed to prevent the crash.** It removes a
-  confirmed bug and a large, real, evidenced amount of unconditional load
-  on suspect machinery, and is covered by unit tests proving the new
-  *logic* is correct — but "the crash doesn't recur" can only be shown by
-  an actual retest against the real game, ideally starting with tier 3
-  (§13.5) since that's the configuration that actually crashed.
+  this session. The isolation tiers (§13.6) are prepared, not executed.
+- **The fix has not been observed to prevent the crash.** It removes two
+  confirmed bugs (§13.3, §13.5) and a large, real, evidenced amount of
+  unconditional load on suspect machinery, and is covered by unit tests
+  proving the new *logic* is correct against realistic mock semantics —
+  but "the crash doesn't recur" can only be shown by an actual retest
+  against the real game, ideally starting with tier 3 (§13.6) since
+  that's the configuration that actually crashed.
 - **CS-DEF-001 (#8) and CS-003 (#4) both stay open** until that retest
   passes. The loader stays disabled
   (`dwmapi.dll.concernedsprint-disabled`) on the real install until a
   coordinated retest window, per issue #8.
 
-### 13.7 Retest plan (for the coordinated window)
+### 13.8 Retest plan (for the coordinated window)
 
 1. Confirm the game is fully closed and no owner session is active before
    touching anything.

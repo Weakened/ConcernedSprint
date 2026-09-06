@@ -87,6 +87,31 @@ function M.on_local_pawn_begin_play(state, pawn, enabled)
     return false
 end
 
+-- Two independently-obtained references to the *same* underlying UE
+-- object are not necessarily `==` in UE4SS's Lua bindings: each property
+-- read or hook-parameter unwrap can construct a fresh wrapper userdata
+-- for the same native pointer, and neither UObject's own wrapper type nor
+-- its bases define a custom equality metamethod (confirmed by an
+-- independent review reading UE4SS's actual source at the pinned commit
+-- -- see docs/RUNTIME_DISCOVERY.md's CS-DEF-001 section). `GetAddress()`
+-- returns the underlying native pointer as a plain Lua number, which
+-- compares by value regardless of wrapper identity, and is UE4SS's own
+-- documented way to identify a UObject (used in its official examples).
+local function same_object(a, b)
+    if not a or not b then
+        return false
+    end
+    local aOk, aAddress = pcall(function() return a:GetAddress() end)
+    if not aOk then
+        return false
+    end
+    local bOk, bAddress = pcall(function() return b:GetAddress() end)
+    if not bOk then
+        return false
+    end
+    return aAddress == bAddress
+end
+
 -- Call from a BeginPlay hook for *any* actor (BeginPlay fires for every
 -- actor in the game, not just pawns). `actor` must already be unwrapped
 -- from any hook-parameter wrapper by the caller (see main.lua and
@@ -113,7 +138,7 @@ function M.on_actor_begin_play(state, actor, isPawnLike, resolvePawn, enabled)
     end
 
     local pawn = resolvePawn()
-    if not pawn or actor ~= pawn then
+    if not pawn or not same_object(actor, pawn) then
         return false
     end
 
