@@ -75,13 +75,14 @@ launched twice via Steam (`steam.exe -applaunch 1929610`) for probing, then
 fully uninstalled by deleting those two added paths.
 
 **Result: fully reversible.** Post-uninstall SHA-256 of the three pre-existing
-files is byte-identical to the pre-install baseline:
+files is byte-identical to the pre-install baseline (both columns below are
+the actual values read at each point in time, not a single asserted figure):
 
-| File | SHA-256 (pre-install and post-uninstall, identical) |
-|---|---|
-| `Shivers-Win64-Shipping.exe` | `ee3ff0f135481b5a540b296a26700541c198fbfa7dc347985b26c8ba87432f6e` |
-| `tbb12.dll` | `5fdf9e1d91ce4b03cb6742d551538010ce995b430f4c28b2a1d664fabb46ad89` |
-| `tbbmalloc.dll` | `0bd90f4831d625613ca5f5279cce892413e6542590f8a8d95b7c46ac04e10a2a` |
+| File | SHA-256 before install | SHA-256 after uninstall |
+|---|---|---|
+| `Shivers-Win64-Shipping.exe` | `ee3ff0f135481b5a540b296a26700541c198fbfa7dc347985b26c8ba87432f6e` | `ee3ff0f135481b5a540b296a26700541c198fbfa7dc347985b26c8ba87432f6e` |
+| `tbb12.dll` | `5fdf9e1d91ce4b03cb6742d551538010ce995b430f4c28b2a1d664fabb46ad89` | `5fdf9e1d91ce4b03cb6742d551538010ce995b430f4c28b2a1d664fabb46ad89` |
+| `tbbmalloc.dll` | `0bd90f4831d625613ca5f5279cce892413e6542590f8a8d95b7c46ac04e10a2a` | `0bd90f4831d625613ca5f5279cce892413e6542590f8a8d95b7c46ac04e10a2a` |
 
 No save data was touched (single-player, main-menu only, no online lobby was
 created).
@@ -257,6 +258,41 @@ stamina access via direct named property access (`Component.Stamina`,
 than enumerating all properties on the class — the specific properties needed
 are plain doubles and a bool, not the type that crashed enumeration.
 
+### 4.6 Planned disable/restore behavior (design, not yet implemented)
+
+CS-002 has not been implemented yet, so this is a design description, not an
+observed result — but the shape of it follows directly from §4.1's evidence
+and does not require guessing anything new:
+
+- `BP_SprintComponent_C` already owns its own depletion/regen loop
+  (`SetUpdateStaminaTimer` / `UpdateStaminaValue`, driven by
+  `StaminaChangeTimer` and `StaminaValueChangeRateBySeconds`) — this is
+  vanilla game logic that keeps running regardless of the mod. The mod is not
+  expected to replace or own this loop; it only needs to counteract its
+  effect while enabled.
+- The intended hook is therefore additive and non-destructive: while enabled,
+  periodically (or on a hook into `UpdateStaminaValue`) re-set `Stamina` back
+  toward `MaximumStamina` for the locally controlled pawn's
+  `BP_SprintComponent`, and/or hook `CanSprint()` to bypass the depletion
+  gate. Nothing about `MaximumStamina`, `StaminaValueChangeRateBySeconds`, or
+  the walk/sprint speed getters (`GetCharacterWalkSpeed`/
+  `GetCharacterSprintingSpeed`) would be modified — those stay exactly as the
+  game defines them, satisfying "preserve normal speed" from the issue scope.
+- **Disabling** is therefore just "stop doing the periodic top-up / stop
+  intercepting `CanSprint()`". Nothing needs to be written back or restored,
+  because nothing the mod touches is ever set to a mod-invented value —
+  `Stamina` is only ever pushed toward `MaximumStamina`, a value the game
+  itself already defines and continues to manage. On the very next timer tick
+  after disabling, the component's own unmodified `UpdateStaminaValue` resumes
+  depleting `Stamina` normally, with no reload/restart required.
+- None of this reads or writes anything persisted to disk (no save file, no
+  config the game owns), so there is no save-state or persistence concern —
+  confined entirely to the live in-memory component instance for the current
+  pawn, which is naturally discarded on pawn/level change like any other
+  actor component.
+- This remains a design description until CS-002 actually implements and
+  tests it; §5 tracks the runtime observation of it as still pending.
+
 ## 5. What remains pending (owner/runtime gate)
 
 Per AGENTS.md, unobserved runtime checks stay explicitly pending rather than
@@ -274,9 +310,11 @@ assumed:
   play session confirms it.
 - **Not yet captured:** `ABP_PlayerCharacter_C`'s exact `/Game/...` asset path
   (its class layout is confirmed; see §4.2).
-- Disabling behavior (restoring vanilla stamina without altering saved state)
-  is a design constraint for CS-002, not yet implemented or observed — the
-  hook has not been written yet, only the interception target identified.
+- Disabling behavior: the intended design is described in §4.6 (stop the
+  top-up, the component's own unmodified loop resumes normal depletion
+  immediately, nothing persisted). It is not yet implemented or observed —
+  the hook has not been written yet, only the interception target and design
+  identified.
 
 ## 6. Reproduction
 
