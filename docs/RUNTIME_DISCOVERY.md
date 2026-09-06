@@ -864,6 +864,24 @@ That mistake is recorded here deliberately: a mock that's more convenient
 than the real API it stands in for can hide exactly the bug it should
 catch.
 
+A second, focused review specifically re-checked the `GetAddress()` fix
+itself, rather than assuming it was correct just because it addressed the
+first review's finding. It confirmed, from `GetAddress()`'s actual
+implementation at the pinned commit
+(`lua.set_integer(reinterpret_cast<uintptr_t>(...))` — a plain integer
+read fresh from the wrapper's stored pointer, in
+`UE4SS/include/LuaType/LuaUObject.hpp`), that this is both correct and
+the only sanctioned identity mechanism UE4SS's Lua API exposes (no
+`__eq`, no `IsSameObject` anywhere in the docs). It also found one real,
+minor hardening gap: `GetAddress()` itself performs no validity check
+(unlike `UObject:IsValid()`, which checks null/pending-kill/liveness),
+and `main.lua`'s `resolve_local_pawn()` returned `playerController.Pawn`
+without calling `:IsValid()` on it — not exploitable at this call site
+(the pawn is used synchronously, no GC window), but inconsistent with
+`sprint_adapter.lua`'s own `get_sprint_component`, which already
+validates its pawn argument. Fixed by adding the same check to
+`resolve_local_pawn()`.
+
 ### 13.6 The fix
 
 Two changes, both in `mod/ConcernedSprint/Scripts/`:
