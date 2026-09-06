@@ -358,35 +358,65 @@ is testable without the game:
   `io.open`/`io.read`/`io.write` (confirmed available in UE4SS's Lua runtime:
   UE4SS's own bundled `BPModLoaderMod` and `ConsoleCommandsMod` use `io.open`
   the same way). Defaults to `enabled=true` when no config file exists yet.
+- `lifecycle.lua` — pure state machine (no UE4SS globals; pawn resolution and
+  status reporting are both injected as functions) that caches the resolved
+  sprint component and rate-limits re-resolution (§10), only writes while
+  enabled, and reports status transitions only when they actually change.
+  Extracted into its own testable module specifically in response to an
+  independent review of an earlier version of this PR that found two real
+  bugs living inline in `main.lua`: (1) the `BeginPlay`-triggered path wrote
+  a stamina value even while the mod was disabled, and (2) a cached
+  component that stayed technically `:IsValid()` but no longer matched the
+  actual current local pawn (e.g. a pawn swap that doesn't re-trigger
+  `BeginPlay`, such as a pre-existing spectator pawn) could go stale
+  indefinitely because nothing ever re-checked it. Both are fixed here — see
+  the module's own comments and §8/§10 for how they're specifically tested
+  and mitigated.
 - `main.lua` — the only file that touches UE4SS globals. Wires
   `RegisterBeginPlayPostHook` (immediate reaction to pawn spawn/replacement,
-  §4.4) and a bounded interval timer (§9.1 explains why it's not a naive
-  fixed-rate poll) to the adapter, plus a `Ctrl+F9` `RegisterKeyBind` toggle
-  that persists through `config.lua` and a `ModRef.OnUnload` that cancels the
+  §4.4) and a bounded interval timer to `lifecycle.lua`'s `tick`/
+  `on_local_pawn_begin_play`, plus a `Ctrl+F9` `RegisterKeyBind` toggle that
+  persists through `config.lua` and a `ModRef.OnUnload` that cancels the
   timer.
 
 ## 8. Unit test evidence (non-game)
 
-`tests/run_tests.lua` runs `sprint_adapter.lua` and `config.lua` against a
-minimal dependency-free harness (`tests/testkit.lua`) using nothing but the
-stock `lua` interpreter (Lua 5.4.6, matching the version UE4SS itself embeds
-— confirmed via a `lua-5.4` path in `UE4SS-RE/RE-UE4SS`'s own `deps/`
-directory) — no game, no UE4SS, no network:
+`tests/run_tests.lua` runs `sprint_adapter.lua`, `config.lua` and
+`lifecycle.lua` against a minimal dependency-free harness
+(`tests/testkit.lua`) using nothing but the stock `lua` interpreter (Lua
+5.4.6, matching the version UE4SS itself embeds — confirmed via a `lua-5.4`
+path in `UE4SS-RE/RE-UE4SS`'s own `deps/` directory) — no game, no UE4SS, no
+network:
 
 ```
-19 passed, 0 failed, 19 total
+31 passed, 0 failed, 31 total
 ```
 
 Covers every state/config/lifecycle case in CS-002's acceptance criteria: nil
 pawn, invalid pawn, `IsValid()` itself throwing, missing/invalid component,
 missing or wrong-typed `Stamina`/`MaximumStamina`, stamina already at or
-above the maximum (must not write), the write itself throwing, and
-config load/save round-trips including a malformed file and an unwritable
-path. One real bug was caught and fixed during this work — not in the
-adapter, but in a test: `{ MaximumStamina = nil }` in a Lua table
-constructor never sets the key at all (a no-op), so the intended "field is
-missing" case silently wasn't exercised until the test was rewritten to
-delete the field from an already-built table instead.
+above the maximum (must not write), the write itself throwing, config
+load/save round-trips including a malformed file and an unwritable path
+(and, after review, actually exercising case-insensitivity on `TRUE`/`True`,
+not only `FALSE` — see below), and the `lifecycle.lua` cases directly
+targeting the two bugs above: a disabled mod attempts zero writes and zero
+pawn searches: an enabled mod resolving-then-caching a component still
+applies it on ticks that don't re-resolve; and a local pawn that changes
+without a new `BeginPlay` is still picked up within one resolve interval
+rather than left stale forever.
+
+Two real bugs were caught and fixed during this work, both found by tests
+or by the process of writing them:
+- Not in the adapter, but in a test: `{ MaximumStamina = nil }` in a Lua
+  table constructor never sets the key at all (a no-op), so the intended
+  "field is missing" case silently wasn't exercised until the test was
+  rewritten to delete the field from an already-built table instead.
+- The independent-review-driven `lifecycle.lua` bugs described in §7 above.
+  A third review finding — the config case-insensitivity test only checked
+  `enabled=FALSE`, which passes identically even if `:lower()` were deleted,
+  since anything not exactly `"true"` already evaluates false — was also
+  fixed by adding tests against `TRUE`/`True`, the only values where
+  lowercasing actually matters.
 
 This proves the mod's own decision logic is correct against every case
 listed. It does **not** prove UE4SS's real Lua bindings behave identically
@@ -478,6 +508,7 @@ design (§7 without the §9-driven revision below) — both crashed:
 | 2 | ConcernedSprint only | Crashed ~30s after mod load |
 | 3 (control) | none (ConcernedSprint disabled in `mods.txt`) | Stable 180s+ |
 | 4 | ConcernedSprint, revised (caches the resolved component; only re-resolves the local pawn every ~10 ticks while nothing valid is cached, instead of every tick) | Stable 180s+ |
+| 5 | ConcernedSprint, after extracting the caching logic into `lifecycle.lua` and fixing the two bugs an independent review found (§7) | Stable 150s+, mod loaded and attached to a real `BP_SprintComponent` cleanly (§9), no new crash reports |
 
 Both crashes were `EXCEPTION_ACCESS_VIOLATION reading address 0x0000000000000010`
 (Windows crash dumps, `%LOCALAPPDATA%\Shivers\Saved\Crashes\`), byte-identical
@@ -509,11 +540,15 @@ menu or not) crashed at almost exactly that point both times; run 4 (same
 mod, but the timer only touches an already-cached object reference and only
 attempts a fresh `UEHelpers:GetPlayerController()`/pawn search once every
 ~10 ticks while idle, instead of every tick) did not crash. `main.lua` was
-revised to that caching design specifically because of this evidence (see
-`sprint_adapter.lua`'s caller in `main.lua` and its comments).
+revised to that caching design specifically because of this evidence. Run 5
+re-confirms this held after the logic moved into `lifecycle.lua` and the two
+bugs in §7 were fixed — the fixes changed *when* resolution and writes
+happen (gating writes on `enabled`, bounding staleness with a periodic
+re-check) but not the core "don't search every tick" property this section
+is about, and stability was re-observed, not just assumed to carry over.
 
-**Read this evidence carefully rather than as a proof.** Four runs (2
-crashed, 2 stable) is a real, reproducible-so-far pattern, not a coincidence
+**Read this evidence carefully rather than as a proof.** Five runs (2
+crashed, 3 stable) is a real, reproducible-so-far pattern, not a coincidence
 dismissed after one retry — but it is not exhaustive, and the shipping
 build's stripped symbols mean the true root cause inside `UE4SS.dll` could
 not be identified, only correlated. What can be said with confidence: this
@@ -523,9 +558,9 @@ running well before both crashes), it is consistent with this being an
 experimental prerelease build against a UE version it only claims "basic
 support" for (§2), and reducing how often Lua code calls into UE4SS's
 object-search machinery during the game's first ~30 seconds measurably
-improved observed stability. The unit-tested adapter/config logic (§8) is
-unaffected either way — this is a loader-environment risk, not a defect in
-`sprint_adapter.lua`/`config.lua`'s own decision logic.
+improved observed stability. The unit-tested adapter/config/lifecycle logic
+(§8) is unaffected either way — this is a loader-environment risk, not a
+defect in this mod's own decision logic.
 
 ## 11. What remains pending after CS-002
 
@@ -537,9 +572,15 @@ unaffected either way — this is a loader-environment risk, not a defect in
   attachment to a real live component.
 - The `Ctrl+F9` toggle firing from an actual keypress (§9.1) — registration
   is confirmed, the keypress-to-effect path is not.
-- The UE4SS stability finding in §10 is a correlation from 4 runs, not a
+- The UE4SS stability finding in §10 is a correlation from 5 runs, not a
   proven root cause; residual crash risk during the first ~30 seconds after
   launch cannot be ruled out to zero with an experimental-build loader.
+- An independent review of this PR found two real logic bugs in an earlier
+  version of the caching/lifecycle code (disabled-mod-still-writes; cache
+  staleness with no upper bound) — both fixed and covered by new
+  `lifecycle.lua` unit tests (§7, §8), and re-verified stable against the
+  live process (§10, run 5). Noted here rather than silently folded in,
+  since it's relevant review history for whoever reads this next.
 - `ABP_PlayerCharacter_C`'s exact `/Game/...` path (§4.2), still not needed
   by the implementation (which resolves whatever pawn is actually possessed
   at runtime rather than hard-coding a class path) but still not captured.

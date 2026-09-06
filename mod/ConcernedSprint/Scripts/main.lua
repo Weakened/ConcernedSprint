@@ -1,41 +1,32 @@
 -- Concerned Sprint: infinite sprint duration for the locally controlled
 -- player, original speed and controls unchanged, with an enable/disable
 -- toggle (Ctrl+F9, persisted). See docs/RUNTIME_DISCOVERY.md for the
--- reflection evidence this is built on, including section 10 for why
--- pawn/component resolution is cached and rate-limited below rather than
--- re-resolved on every tick.
+-- reflection evidence this is built on. All caching/rate-limiting/
+-- disable-gating logic lives in lifecycle.lua (unit-tested); this file is
+-- only the UE4SS wiring around it.
 local UEHelpers = require("UEHelpers")
-local Adapter = require("sprint_adapter")
 local Config = require("config")
+local Lifecycle = require("lifecycle")
 
 local TAG = "[ConcernedSprint]"
 local CONFIG_PATH = "Mods/ConcernedSprint/enabled.txt"
 local TICK_INTERVAL_MS = 300
--- While no valid local pawn/component is cached (menus, loading, between
--- lives), re-resolution attempts are throttled to this many ticks apart
--- instead of attempted every tick -- see docs/RUNTIME_DISCOVERY.md section 10.
-local RESOLVE_COOLDOWN_TICKS = 10
+local RESOLVE_INTERVAL_TICKS = 10 -- ~3s at 300ms; see lifecycle.lua / docs/RUNTIME_DISCOVERY.md section 10
 
 local state = Config.load(CONFIG_PATH)
-local lastStatus = nil
-local cachedComponent = nil
-local ticksSinceLastResolve = RESOLVE_COOLDOWN_TICKS -- resolve immediately on the first tick
 
--- Bounded, transition-only logging: prints once per state change instead
--- of once per tick, per the "useful, bounded logging" requirement.
 local function log_status(status, detail)
-    if status == lastStatus then
-        return
-    end
-    lastStatus = status
     if status == "no_pawn" then
         print(string.format("%s No local pawn (menu or between lives); idle\n", TAG))
     elseif status == "no_component" then
-        print(string.format("%s Local pawn has no BP_SprintComponent (class: %s); feature inactive for this pawn\n", TAG, tostring(detail)))
+        local classOk, className = pcall(function() return detail:GetClass():GetFullName() end)
+        print(string.format("%s Local pawn has no BP_SprintComponent (class: %s); feature inactive for this pawn\n", TAG, classOk and className or "?"))
     elseif status == "attached" then
         print(string.format("%s Sprint adapter attached to local pawn\n", TAG))
     end
 end
+
+local lifecycleState = Lifecycle.new(RESOLVE_INTERVAL_TICKS, log_status)
 
 -- UEHelpers:GetPlayerController() returns the LOCAL PlayerController in a
 -- client context (docs.ue4ss.com's own worked example uses exactly this
@@ -60,83 +51,23 @@ local function resolve_local_pawn()
     return pawn
 end
 
-local function is_cached_component_valid()
-    if not cachedComponent then
-        return false
-    end
-    local ok, valid = pcall(function() return cachedComponent:IsValid() end)
-    return ok and valid == true
-end
-
--- Re-resolves the local pawn's sprint component and updates the cache.
--- `pawn`, if already known (e.g. from the BeginPlay hook below), is used
--- directly to avoid a redundant resolve_local_pawn() call.
-local function refresh_cache(pawn)
-    pawn = pawn or resolve_local_pawn()
-    if not pawn then
-        cachedComponent = nil
-        log_status("no_pawn")
-        return
-    end
-
-    local component = Adapter.get_sprint_component(pawn)
-    if not component then
-        cachedComponent = nil
-        local classOk, className = pcall(function() return pawn:GetClass():GetFullName() end)
-        log_status("no_component", classOk and className or "?")
-        return
-    end
-
-    cachedComponent = component
-    log_status("attached")
-end
-
-local function tick()
-    if not state.enabled then
-        return
-    end
-
-    if is_cached_component_valid() then
-        Adapter.apply(cachedComponent)
-        return
-    end
-
-    -- No valid cached component: rate-limit re-resolution attempts rather
-    -- than searching for a pawn on every tick while idle at a menu or
-    -- between lives (docs/RUNTIME_DISCOVERY.md section 10).
-    ticksSinceLastResolve = ticksSinceLastResolve + 1
-    if ticksSinceLastResolve < RESOLVE_COOLDOWN_TICKS then
-        return
-    end
-    ticksSinceLastResolve = 0
-
-    refresh_cache()
-    if cachedComponent then
-        Adapter.apply(cachedComponent)
-    end
-end
-
 -- Immediate reaction to pawn spawn/replacement (map change, death/respawn,
 -- spectator swap): a native, engine-wide hook on AActor::BeginPlay, fires
 -- once per actor spawn -- not a scan, not per-frame. Filtered down to only
--- the local pawn before doing anything, and forces an immediate cache
--- refresh rather than waiting for the next throttled tick.
+-- the local pawn before doing anything.
 RegisterBeginPlayPostHook(function(Actor)
     local pawn = resolve_local_pawn()
     if pawn and Actor == pawn then
-        ticksSinceLastResolve = RESOLVE_COOLDOWN_TICKS
-        refresh_cache(pawn)
-        if cachedComponent then
-            Adapter.apply(cachedComponent)
-        end
+        Lifecycle.on_local_pawn_begin_play(lifecycleState, pawn, state.enabled)
     end
 end)
 
 -- Sustained top-up while sprinting, at a fixed interval rather than every
--- frame. When a component is already cached this only touches that one
--- already-resolved reference (a plain property read/write); it does not
--- repeat the pawn/controller search every tick.
-local loopHandle = LoopInGameThreadWithDelay(TICK_INTERVAL_MS, tick)
+-- frame. Pawn/component resolution itself is further rate-limited inside
+-- lifecycle.lua; most ticks only touch an already-cached property.
+local loopHandle = LoopInGameThreadWithDelay(TICK_INTERVAL_MS, function()
+    Lifecycle.tick(lifecycleState, resolve_local_pawn, state.enabled)
+end)
 
 -- Toggle + persist. Takes effect on the very next tick (<= TICK_INTERVAL_MS)
 -- or immediately via the BeginPlay hook above; no reload/restart needed in

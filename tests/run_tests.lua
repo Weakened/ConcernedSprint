@@ -3,11 +3,13 @@
 -- game, no UE4SS, no network. Exits 0 if every test passed, 1 otherwise,
 -- so it can be used as a CI check.
 --
--- What this does and does not prove: it proves sprint_adapter.lua and
--- config.lua behave correctly against every state/config/lifecycle case
--- listed in CS-002's acceptance criteria (nil/invalid pawns, missing
--- component, wrong-typed properties, already-full stamina, write
--- failures, malformed/missing config). It does NOT prove UE4SS's real Lua
+-- What this does and does not prove: it proves sprint_adapter.lua,
+-- config.lua and lifecycle.lua behave correctly against every state/
+-- config/lifecycle case listed in CS-002's acceptance criteria (nil/
+-- invalid pawns, missing component, wrong-typed properties, already-full
+-- stamina, write failures, malformed/missing config, disabled-mod
+-- gating, bounded re-resolution frequency, bounded cache staleness,
+-- transition-only status reporting). It does NOT prove UE4SS's real Lua
 -- bindings behave the same way against the actual game -- that is tracked
 -- separately in docs/RUNTIME_DISCOVERY.md as pending runtime evidence, per
 -- CS-002's "do not treat mocked tests as proof of compatibility".
@@ -19,6 +21,7 @@ package.path = scriptDir .. "?.lua;"
 
 require("test_sprint_adapter")
 require("test_config")
+require("test_lifecycle")
 
 local testkit = require("testkit")
 local allPassed = testkit.run()

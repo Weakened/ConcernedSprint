@@ -10,7 +10,13 @@ local Config = require("config")
 -- there is nothing UE4SS-specific left to fake here.
 
 local function temp_path(name)
-    return os.tmpname() .. "_" .. name
+    -- os.tmpname() itself creates an empty file at its returned path; that
+    -- exact path isn't the one used below (a suffix is appended so a
+    -- distinct name is available per test), so it's removed immediately
+    -- rather than left behind on every test run.
+    local base = os.tmpname()
+    os.remove(base)
+    return base .. "_" .. name
 end
 
 local function cleanup(path)
@@ -50,13 +56,36 @@ t.test("load tolerates a malformed file by defaulting to enabled", function()
     cleanup(path)
 end)
 
-t.test("load is case-insensitive on the boolean word", function()
-    local path = temp_path("case.txt")
+t.test("load is case-insensitive on false", function()
+    local path = temp_path("case_false.txt")
     local file = io.open(path, "w")
     file:write("enabled=FALSE\n")
     file:close()
     local state = Config.load(path)
     t.assert_false(state.enabled)
+    cleanup(path)
+end)
+
+t.test("load is case-insensitive on true (the only case where lowercasing actually matters)", function()
+    -- The false case above passes even without :lower(), since anything
+    -- that isn't exactly "true" already evaluates false -- this is the
+    -- case that actually exercises case-insensitive matching.
+    local path = temp_path("case_true.txt")
+    local file = io.open(path, "w")
+    file:write("enabled=TRUE\n")
+    file:close()
+    local state = Config.load(path)
+    t.assert_true(state.enabled)
+    cleanup(path)
+end)
+
+t.test("load is case-insensitive on mixed-case True", function()
+    local path = temp_path("case_mixed.txt")
+    local file = io.open(path, "w")
+    file:write("enabled=True\n")
+    file:close()
+    local state = Config.load(path)
+    t.assert_true(state.enabled)
     cleanup(path)
 end)
 
