@@ -1,4 +1,4 @@
-# Runtime discovery (CS-001)
+# Runtime discovery (CS-001, CS-002)
 
 Evidence for the installed Demonologist build, the selected UE4SS loader, and the
 real sprint/stamina hook. All findings below come from direct inspection of the
@@ -6,7 +6,8 @@ locally licensed install and a reversible, isolated UE4SS probe run against it
 (session `claude-bg-f2f50a48`, 2026-09-06). No class, property or function name
 in this document is guessed; each one was read from either the game's own file
 version resource or from UE4SS reflection/SDK data generated against the live
-process.
+process. Sections 1-6 are CS-001 (discovery); sections 7+ are CS-002
+(implementation and its own runtime verification).
 
 ## 1. Installed game and engine
 
@@ -296,7 +297,9 @@ and does not require guessing anything new:
 ## 5. What remains pending (owner/runtime gate)
 
 Per AGENTS.md, unobserved runtime checks stay explicitly pending rather than
-assumed:
+assumed. Status below is as of CS-001; §7-11 record what CS-002 additionally
+observed (some of these items were narrowed, not eliminated — see the
+forward references).
 
 - **Not yet observed:** the local player's `BP_SprintComponent.Stamina` value
   actually depleting during a live sprint, or `OnTired` firing at zero. This
@@ -307,14 +310,20 @@ assumed:
   it landed correctly; single-player is confirmed available (Steam community
   discussion) for whenever a human or a future visually-driven session runs
   this. CS-002/CS-003 should record this explicitly as pending until an actual
-  play session confirms it.
+  play session confirms it. **Update, CS-002 (§9):** the adapter was observed
+  attaching to a real, live `BP_SprintComponent` and applying without error;
+  actual depletion-during-active-sprint is still unobserved (menu context, not
+  gameplay) and remains a CS-003 item.
 - **Not yet captured:** `ABP_PlayerCharacter_C`'s exact `/Game/...` asset path
-  (its class layout is confirmed; see §4.2).
+  (its class layout is confirmed; see §4.2). Still not captured after CS-002.
 - Disabling behavior: the intended design is described in §4.6 (stop the
   top-up, the component's own unmodified loop resumes normal depletion
   immediately, nothing persisted). It is not yet implemented or observed —
   the hook has not been written yet, only the interception target and design
-  identified.
+  identified. **Update, CS-002:** now implemented (§7) and covered by unit
+  tests (§8); the keybind toggle's registration is confirmed live (§9) but an
+  actual keypress-triggered toggle was not confirmed (§9 notes why) and
+  in-match observation remains a CS-003 item.
 
 ## 6. Reproduction
 
@@ -331,3 +340,206 @@ assumed:
    `GenerateSDK()` was called, `ue4ss\CXXHeaderDump\*.hpp`.
 6. To uninstall: close the game, delete `dwmapi.dll` and the `ue4ss\` folder;
    verify the remaining files' hashes against the step-3 baseline.
+
+## 7. CS-002 implementation
+
+`mod/ConcernedSprint/Scripts/` contains the mod, split so the decision logic
+is testable without the game:
+
+- `sprint_adapter.lua` — pure functions only. `get_sprint_component(pawn)`
+  walks `pawn.BP_SprintComponent` (§4.2) and validates it via `:IsValid()`,
+  returning `nil` on any nil/invalid/unexpected shape rather than throwing.
+  `apply(component)` reads `Stamina`/`MaximumStamina` (§4.1) and writes
+  `Stamina = MaximumStamina` only when `Stamina < MaximumStamina`. It never
+  writes a value the game didn't already define as the ceiling — see §4.6 for
+  why that makes disabling a no-restore-needed no-op. Every UE4SS call is
+  wrapped in `pcall`.
+- `config.lua` — plain-text `enabled=true|false` persistence via stock Lua
+  `io.open`/`io.read`/`io.write` (confirmed available in UE4SS's Lua runtime:
+  UE4SS's own bundled `BPModLoaderMod` and `ConsoleCommandsMod` use `io.open`
+  the same way). Defaults to `enabled=true` when no config file exists yet.
+- `main.lua` — the only file that touches UE4SS globals. Wires
+  `RegisterBeginPlayPostHook` (immediate reaction to pawn spawn/replacement,
+  §4.4) and a bounded interval timer (§9.1 explains why it's not a naive
+  fixed-rate poll) to the adapter, plus a `Ctrl+F9` `RegisterKeyBind` toggle
+  that persists through `config.lua` and a `ModRef.OnUnload` that cancels the
+  timer.
+
+## 8. Unit test evidence (non-game)
+
+`tests/run_tests.lua` runs `sprint_adapter.lua` and `config.lua` against a
+minimal dependency-free harness (`tests/testkit.lua`) using nothing but the
+stock `lua` interpreter (Lua 5.4.6, matching the version UE4SS itself embeds
+— confirmed via a `lua-5.4` path in `UE4SS-RE/RE-UE4SS`'s own `deps/`
+directory) — no game, no UE4SS, no network:
+
+```
+19 passed, 0 failed, 19 total
+```
+
+Covers every state/config/lifecycle case in CS-002's acceptance criteria: nil
+pawn, invalid pawn, `IsValid()` itself throwing, missing/invalid component,
+missing or wrong-typed `Stamina`/`MaximumStamina`, stamina already at or
+above the maximum (must not write), the write itself throwing, and
+config load/save round-trips including a malformed file and an unwritable
+path. One real bug was caught and fixed during this work — not in the
+adapter, but in a test: `{ MaximumStamina = nil }` in a Lua table
+constructor never sets the key at all (a no-op), so the intended "field is
+missing" case silently wasn't exercised until the test was rewritten to
+delete the field from an already-built table instead.
+
+This proves the mod's own decision logic is correct against every case
+listed. It does **not** prove UE4SS's real Lua bindings behave identically
+against the actual game — that is what §9 covers, and it is intentionally
+kept separate per CS-002's "do not treat mocked tests as proof of
+compatibility."
+
+## 9. Runtime verification against the live process
+
+Same reversible install/probe method as §3 (backup, hash-verified
+install/uninstall; see §10 for one addition this round). The real
+`ConcernedSprint` mod (not a probe) was deployed and launched via Steam.
+
+**Property writes work end-to-end**, closing a gap §4.5 left open (CS-001
+only exercised reads): a temporary, session-only probe mod
+(`WritabilityProbe`, not part of the shipped mod) used the exact
+`Engine.MaxParticleResize` example from `docs.ue4ss.com`'s own docs —
+read (`0`) → write (`4`) → read back (`4`) → restore (`0`) — all against the
+live process:
+
+```
+[WritabilityProbe] Engine.MaxParticleResize before write: 0
+[WritabilityProbe] Engine.MaxParticleResize after write: 4
+[WritabilityProbe] WRITE VERIFIED: property write took effect and read back correctly
+[WritabilityProbe] Restored Engine.MaxParticleResize to 0
+```
+
+**The mod loaded and ran cleanly**, with no Lua errors, across every launch
+this round. Its `require("UEHelpers")` / `require("sprint_adapter")` /
+`require("config")` sibling-relative requires resolved correctly (matching
+the pattern observed in UE4SS's own bundled `ConsoleCommandsMod`), and
+`RegisterBeginPlayPostHook`, `LoopInGameThreadWithDelay`, `RegisterKeyBind`,
+and `ModRef.OnUnload` all registered without error.
+
+**Local-pawn resolution and bounded logging were both observed working
+correctly, not just designed that way.** At the main menu, the locally
+controlled pawn resolved to a plain engine `DefaultPawn` (menu background
+camera, not the gameplay character) — the adapter correctly found it has no
+`BP_SprintComponent` and logged that once:
+
+```
+[ConcernedSprint] Local pawn has no BP_SprintComponent (class: Class /Script/Engine.DefaultPawn); feature inactive for this pawn
+```
+
+That line did not repeat again despite the mod running for minutes afterward
+at a 300ms tick interval (100s of ticks) — direct confirmation the
+transition-only logging design (§7) actually suppresses per-tick spam in the
+real process, not just in the unit tests.
+
+**The adapter attached to a real, live `BP_SprintComponent`.** A few seconds
+after the local player's `CheatManager` was constructed (i.e. once the
+PlayerController environment was further along), resolution found a
+different pawn that does have the component, and logged the transition with
+no error following it — meaning `sprint_adapter.apply()` executed against a
+real `BP_SprintComponent` instance without throwing:
+
+```
+[ConcernedSprint] Sprint adapter attached to local pawn
+```
+
+This is the strongest evidence gathered so far that the mod's actual
+integration works, short of observing stamina hold steady through an active
+sprint in a real match (still pending — see §11; the pawn here was a menu
+context, not gameplay, so there is no meaningful "was it sprinting"
+observation to make yet).
+
+### 9.1 Keybind toggle: registration confirmed, keypress inconclusive
+
+`RegisterKeyBind(Key.F9, {ModifierKey.CONTROL}, ...)` registered without
+error (part of the clean mod-load evidence above). An actual `Ctrl+F9`
+keypress was attempted via Windows `SendKeys` against the focused game
+window; the process stayed alive and responsive afterward, but no
+`[ConcernedSprint] Enabled/Disabled` log line appeared, so the toggle itself
+was not confirmed to fire. `UE4SS.log` (CS-001, §3) shows `Input source set
+to: Win32Async`, consistent with UE4SS polling raw keyboard state rather than
+reading the Windows message queue that `SendKeys` posts to — a known general
+limitation of synthetic input against this class of input handling, not
+specific to this mod. A real keypress (owner/future visually-driven session)
+remains the way to confirm this.
+
+## 10. A UE4SS stability issue found, diagnosed, and mitigated
+
+The first two runs this round — the real `ConcernedSprint` mod, initial
+design (§7 without the §9-driven revision below) — both crashed:
+
+| Run | Mods active | Result |
+|---|---|---|
+| 1 | ConcernedSprint + WritabilityProbe | Crashed ~40s after mod load |
+| 2 | ConcernedSprint only | Crashed ~30s after mod load |
+| 3 (control) | none (ConcernedSprint disabled in `mods.txt`) | Stable 180s+ |
+| 4 | ConcernedSprint, revised (caches the resolved component; only re-resolves the local pawn every ~10 ticks while nothing valid is cached, instead of every tick) | Stable 180s+ |
+
+Both crashes were `EXCEPTION_ACCESS_VIOLATION reading address 0x0000000000000010`
+(Windows crash dumps, `%LOCALAPPDATA%\Shivers\Saved\Crashes\`), byte-identical
+in shape: the same ~22-frame call stack entirely inside `UE4SS.dll`, then a
+few `Shivers-Win64-Shipping` frames, then `kernel32`/`ntdll`. The shipping
+build has no debug symbols, so no function names are available — only module
+names and offsets. Both times, `UE4SS.log` ends within about a second of the
+same internal UE4SS lifecycle event:
+
+```
+[HashTables] Self test passed (5376 classes with instances)
+[HashTables] Searcher pools and GUObjectArray listeners retired
+```
+
+— UE4SS switching its internal object lookups from iterating `GUObjectArray`
+directly over to a faster hash-table cache (`UE4SS-settings.ini`'s own
+comments describe this exact transition: *"The cache is dropped at runtime
+once `FUObjectHashTables` passes its self test, since the tables replace
+it"*). Trying the documented escape hatch for this
+(`bForceGUObjectArrayForIteration = true`, whose own comment says *"Set to
+true if hash table iteration is causing crashes"*) did **not** prevent the
+crash — same signature, similar timing — so this is not simply that switch.
+
+The differential that did matter: run 3 (control, no custom mod at all) sailed
+through that exact transition and stayed stable; runs 1-2 (the original
+polling design, which unconditionally called
+`UEHelpers:GetPlayerController()` → `.Pawn` on every single 300ms timer tick,
+menu or not) crashed at almost exactly that point both times; run 4 (same
+mod, but the timer only touches an already-cached object reference and only
+attempts a fresh `UEHelpers:GetPlayerController()`/pawn search once every
+~10 ticks while idle, instead of every tick) did not crash. `main.lua` was
+revised to that caching design specifically because of this evidence (see
+`sprint_adapter.lua`'s caller in `main.lua` and its comments).
+
+**Read this evidence carefully rather than as a proof.** Four runs (2
+crashed, 2 stable) is a real, reproducible-so-far pattern, not a coincidence
+dismissed after one retry — but it is not exhaustive, and the shipping
+build's stripped symbols mean the true root cause inside `UE4SS.dll` could
+not be identified, only correlated. What can be said with confidence: this
+is a UE4SS-internal crash (the entire relevant call stack is inside
+`UE4SS.dll`, not the game or this mod's Lua code, which had already finished
+running well before both crashes), it is consistent with this being an
+experimental prerelease build against a UE version it only claims "basic
+support" for (§2), and reducing how often Lua code calls into UE4SS's
+object-search machinery during the game's first ~30 seconds measurably
+improved observed stability. The unit-tested adapter/config logic (§8) is
+unaffected either way — this is a loader-environment risk, not a defect in
+`sprint_adapter.lua`/`config.lua`'s own decision logic.
+
+## 11. What remains pending after CS-002
+
+- Stamina holding steady through an actual, active sprint in a real match —
+  needs a spawned gameplay pawn while actively sprinting, which needs a
+  human or a future visually-driven session to reach (§5, §9). Everything
+  independently verifiable without that has been: the hook mechanism, the
+  property read/write path, local-pawn resolution, bounded logging, and
+  attachment to a real live component.
+- The `Ctrl+F9` toggle firing from an actual keypress (§9.1) — registration
+  is confirmed, the keypress-to-effect path is not.
+- The UE4SS stability finding in §10 is a correlation from 4 runs, not a
+  proven root cause; residual crash risk during the first ~30 seconds after
+  launch cannot be ruled out to zero with an experimental-build loader.
+- `ABP_PlayerCharacter_C`'s exact `/Game/...` path (§4.2), still not needed
+  by the implementation (which resolves whatever pawn is actually possessed
+  at runtime rather than hard-coding a class path) but still not captured.
